@@ -24,10 +24,12 @@ static mempool::pool_t *pools[mempool::num_pools] = {
 #undef P
 };
 
+static const bool debug_mode = true; // **** Set this to false to disable debug mode
+
 mempool::pool_t& mempool::GetPool(mempool::pool_index_t ix) {
    if (pools[ix]) return *pools[ix];
 #define P(x) \
-   case x: pools[ix] = new mempool::pool_t(#x,true); break;
+   case x: pools[ix] = new mempool::pool_t(#x,debug_mode); break;
 
    switch (ix) {
       DEFINE_MEMORY_POOLS_HELPER(P);

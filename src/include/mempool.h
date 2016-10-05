@@ -47,12 +47,87 @@ The goal is to be able to inexpensively answer the question: How much memory is 
 However, there is also a "debug" mode which enables substantial additional statistics to be tracked.
 It is hoped that the 'debug' mode is inexpensive enough to allow it to be enabled on production systems.
 
+Using memory pools is very easy.
+
+To create a new memory pool, simply add a new name into the list of memory pools that's defined in "DEFINE_MEMORY_POOLS_HELPER".
+-- that's it -- :)
+
+For each memory pool that's created a C++ namespace is also automatically created (name is same as in DEFINE_MEMORY_POOLS_HELPER).
+In that namespace is automatically declared for you all of the slab containers. 
+(For details on slab_xxxx containers see include/slab_containers.h)
+
+Thus for mempool "unittest_1" we have automatically available to us:
+
+   unittest_1::map
+   unittest_1::multimap
+   unittest_1::set
+   unittest_1::multiset
+   unittest_1::list
+   unittest_1::vector
+
+For standalone object, i.e., not in a container we utilize class-based operator new and delete AND a "factory" object
+that serves as a container for all of the instances of the standalone object type.
+
+Thus for a particular object of type "T" we have:
+
+   struct T {
+      MEMBER_OF_MEMPOOL()
+      ...
+   };
+
+else where, in some .cc file we define the operator new/delete code (and the factory object) with:
+
+   DEFINE_OBJECT_IN_MEMPOOL(T,unittest_1,stackSize)
+
+<just like all slab_xxx containers, memory is pre-allocated for the first "stackSize" objects, you can set it to 0 if you like :)
+
+----------------
+At any time, you can call the function unittest_1::allocated_bytes() which will tell you how many malloc'ed
+bytes there currently are in the mempool. No locking required.
+----------------
+
+Debug_Mode statistics
+
+Debug_mode is globally statically enabled/disabled through a line in mempool.cc (static definition of debug_mode).
+
+When debug mode is on, the following statistics are available. When debug mode is off, you can make these calls, but the
+results will all be empty (since there aren't any stats available). But it won't fault out...
+
+Each memory pool collects 4 statistics for each "container" that's in the memory pool. There are several ways to 
+interrogate and retrieve these statistics that sort and aggregate them accordingly.
+
+The 4 "stats" for each container are:
+
+slots: Number of elements currently allocated for the container. 
+   For nodal containers (set,map,list,...) it's the same as .size()
+   For vectors, it's the same as capacity()
+slabs: Number of slabs of memory currently allocated to this container (either in use or not in use)
+bytes: Number of bytes of memory currently allocated to this container (either in use or not in use)
+typeID: a string that's the type signature. (a demangled typeid for the container).
+
+The four external interrogation functions are:
+
+void mempool::DumpStatsByBytes(const std::string& prefix,ceph::Formatter *f,size_t trim = 50);
+void mempool::DumpStatsBySlots(const std::string& prefix,ceph::Formatter *f,size_t trim = 50);
+void mempool::DumpStatsBySlabs(const std::string& prefix,ceph::Formatter *f,size_t trim = 50);
+void mempool::DumpStatsByTypeID(const std::string& prefix,ceph::Formatter *f,size_t trim = 50);
+
+Where prefix is used to select pools to be examined. A prefix of "" will collect against all pools.
+A prefix of "unit" will collect against all pools that start with "unit".
+
+trim controls the size of the stats, you'll get at most "trim" elements and those will be the "trim" LARGEST elements.
+
+For ...ByBytes, ...BySlots, ...BySlabs The output is containers sorted by those criteria.
+For ...ByTypeID The output is summed by typeID (i.e., summed across all containers of the same type)
 
 **********************/
 
 namespace mempool {
 
 
+//
+// Adding to this #define creates a mempool of the same name
+//
 #define DEFINE_MEMORY_POOLS_HELPER(f) \
    f(unittest_1) \
    f(unittest_2)   
