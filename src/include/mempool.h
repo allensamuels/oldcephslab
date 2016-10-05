@@ -55,7 +55,7 @@ namespace mempool {
 
 #define DEFINE_MEMORY_POOLS_HELPER(f) \
    f(unittest_1) \
-   f(uniitest_2)   
+   f(unittest_2)   
 
 
 #define P(x) x,
@@ -980,6 +980,22 @@ private:
 
 };
 
+//
+// Finally, a way to allocate non-container objects :)
+//
+// This only support standalone objects, not arrays. Arrays could be added if they're needed
+//
+template<pool_index_t pool_ix,typename o,size_t stackCount,size_t heapCount>
+class factory {
+   slab_allocator<o,stackCount,heapCount> alloc;
+public:
+   factory() {
+      alloc.AttachPool(pool_ix,typeid(*this).name());
+   }
+   void *allocate() { return (void *)alloc.allocate(1); }
+   void  free(void *p) { alloc.deallocate((o *)p,0); }
+};
+
 }; // Namespace mempool
 
 //
@@ -997,16 +1013,18 @@ inline constexpr size_t defaultSlabHeapCount(size_t Slotsize,size_t overheads) {
 
 #define P(x) \
 namespace x { \
-  template<typename k,typename v, int stackSize, int heapSize = defaultSlabHeapCount(sizeof(k) + sizeof(v),3), typename cmp = std::less<k> > \
+  template<typename k,typename v, size_t stackSize, size_t heapSize = defaultSlabHeapCount(sizeof(k) + sizeof(v),3), typename cmp = std::less<k> > \
       using map = mempool::map<mempool::x,k,v,stackSize,heapSize,cmp>; \
-  template<typename k,typename v, int stackSize, int heapSize = defaultSlabHeapCount(sizeof(k) + sizeof(v),3), typename cmp = std::less<k> > \
+  template<typename k,typename v, size_t stackSize, size_t heapSize = defaultSlabHeapCount(sizeof(k) + sizeof(v),3), typename cmp = std::less<k> > \
       using multimap = mempool::multimap<mempool::x,k,v,stackSize,heapSize,cmp>; \
-  template<typename k, int stackSize, int heapSize = defaultSlabHeapCount(sizeof(k),2), typename cmp = std::less<k> > \
+  template<typename k, size_t stackSize, size_t heapSize = defaultSlabHeapCount(sizeof(k),2), typename cmp = std::less<k> > \
       using set = mempool::set<mempool::x,k,stackSize,heapSize,cmp>; \
-  template<typename v, int stackSize, int heapSize  = defaultSlabHeapCount(sizeof(v),2) > \
+  template<typename v, size_t stackSize, size_t heapSize  = defaultSlabHeapCount(sizeof(v),2) > \
       using list = mempool::list<mempool::x,v,stackSize,heapSize>; \
-  template<typename v, int stackSize = defaultSlabHeapCount(sizeof(v),0) > \
+  template<typename v, size_t stackSize > \
       using vector = mempool::vector<mempool::x,v,stackSize>; \
+  template<typename v, size_t stackSize, size_t heapSize = defaultSlabHeapCount(sizeof(v),1)> \
+      using factory = mempool::factory<mempool::x,v,stackSize,heapSize>; \
   inline size_t allocated_bytes() { \
       return mempool::GetPool(mempool::x).allocated_bytes(); \
   } \
@@ -1015,6 +1033,29 @@ namespace x { \
 DEFINE_MEMORY_POOLS_HELPER(P)
 
 #undef P
+
+//
+// Helper macros for proper implementation of object factories.
+//
+// Use this macro to create type-specific operator new and delete.
+// It should be part of the 
+//
+#define MEMBER_OF_MEMPOOL() \
+   void *operator new(size_t size); \
+   void *operator new[](size_t size) { assert(0 == "No array new"); } \
+   void  operator delete(void *); \
+   void  operator delete[](void *) { assert(0 == "no array delete"); } \
+
+//
+// Use this macro in some particular .cc file to match the above macro
+// It creates the object factory and creates the relevant operator new and delete stuff
+//
+
+#define DEFINE_OBJECT_IN_MEMPOOL(obj,pool,stackSize) \
+static pool::factory<obj,stackSize> _factory##obj; \
+void * obj::operator new(size_t size) { assert(size == sizeof(obj)); return _factory##obj.allocate(); } \
+void   obj::operator delete(void *p)  { _factory##obj.free(p); }
+
 
 #endif // _slab_CONTAINERS_H
 
