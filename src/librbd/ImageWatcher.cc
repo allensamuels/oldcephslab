@@ -11,7 +11,6 @@
 #include "librbd/TaskFinisher.h"
 #include "librbd/Utils.h"
 #include "librbd/exclusive_lock/Policy.h"
-#include "librbd/image_watcher/Notifier.h"
 #include "librbd/image_watcher/NotifyLockOwner.h"
 #include "librbd/image_watcher/RewatchRequest.h"
 #include "include/encoding.h"
@@ -85,7 +84,7 @@ ImageWatcher<I>::ImageWatcher(I &image_ctx)
     m_task_finisher(new TaskFinisher<Task>(*m_image_ctx.cct)),
     m_async_request_lock(util::unique_lock_name("librbd::ImageWatcher::m_async_request_lock", this)),
     m_owner_client_id_lock(util::unique_lock_name("librbd::ImageWatcher::m_owner_client_id_lock", this)),
-    m_notifier(image_ctx)
+    m_notifier(image_ctx.op_work_queue, image_ctx.md_ctx, image_ctx.header_oid)
 {
 }
 
@@ -350,6 +349,18 @@ void ImageWatcher<I>::notify_rename(const std::string &image_name,
 }
 
 template <typename I>
+void ImageWatcher<I>::notify_update_features(uint64_t features, bool enabled,
+                                             Context *on_finish) {
+  assert(m_image_ctx.owner_lock.is_locked());
+  assert(m_image_ctx.exclusive_lock &&
+         !m_image_ctx.exclusive_lock->is_lock_owner());
+
+  bufferlist bl;
+  ::encode(NotifyMessage(UpdateFeaturesPayload(features, enabled)), bl);
+  notify_lock_owner(std::move(bl), on_finish);
+}
+
+template <typename I>
 void ImageWatcher<I>::notify_header_update(Context *on_finish) {
   ldout(m_image_ctx.cct, 10) << this << ": " << __func__ << dendl;
 
@@ -365,7 +376,7 @@ void ImageWatcher<I>::notify_header_update(librados::IoCtx &io_ctx,
   // supports legacy (empty buffer) clients
   bufferlist bl;
   ::encode(NotifyMessage(HeaderUpdatePayload()), bl);
-  io_ctx.notify2(oid, bl, image_watcher::Notifier::NOTIFY_TIMEOUT, nullptr);
+  io_ctx.notify2(oid, bl, object_watcher::Notifier::NOTIFY_TIMEOUT, nullptr);
 }
 
 template <typename I>
@@ -463,11 +474,12 @@ void ImageWatcher<I>::notify_request_lock() {
   RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
   RWLock::RLocker snap_locker(m_image_ctx.snap_lock);
 
-  // ExclusiveLock state machine can be dynamically disabled
-  if (m_image_ctx.exclusive_lock == nullptr) {
+  // ExclusiveLock state machine can be dynamically disabled or
+  // race with task cancel
+  if (m_image_ctx.exclusive_lock == nullptr ||
+      m_image_ctx.exclusive_lock->is_lock_owner()) {
     return;
   }
-  assert(!m_image_ctx.exclusive_lock->is_lock_owner());
 
   ldout(m_image_ctx.cct, 10) << this << " notify request lock" << dendl;
 
@@ -941,6 +953,28 @@ bool ImageWatcher<I>::handle_payload(const RenamePayload& payload,
 
       m_image_ctx.operations->execute_rename(payload.image_name,
                                              new C_ResponseMessage(ack_ctx));
+      return false;
+    } else if (r < 0) {
+      ::encode(ResponseMessage(r), ack_ctx->out);
+    }
+  }
+  return true;
+}
+
+template <typename I>
+bool ImageWatcher<I>::handle_payload(const UpdateFeaturesPayload& payload,
+                                     C_NotifyAck *ack_ctx) {
+  RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
+  if (m_image_ctx.exclusive_lock != nullptr) {
+    int r;
+    if (m_image_ctx.exclusive_lock->accept_requests(&r)) {
+      ldout(m_image_ctx.cct, 10) << this << " remote update_features request: "
+                                 << payload.features << " "
+                                 << (payload.enabled ? "enabled" : "disabled")
+                                 << dendl;
+
+      m_image_ctx.operations->execute_update_features(
+        payload.features, payload.enabled, new C_ResponseMessage(ack_ctx), 0);
       return false;
     } else if (r < 0) {
       ::encode(ResponseMessage(r), ack_ctx->out);

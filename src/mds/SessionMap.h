@@ -104,9 +104,7 @@ public:
 
   void push_pv(version_t pv)
   {
-    if (!projected.empty()) {
-      assert(projected.back() != pv);
-    }
+    assert(projected.empty() || projected.back() != pv);
     projected.push_back(pv);
   }
 
@@ -312,7 +310,7 @@ public:
   }
 
   int check_access(CInode *in, unsigned mask, int caller_uid, int caller_gid,
-		   int new_uid, int new_gid);
+		   const vector<uint64_t> *gid_list, int new_uid, int new_gid);
 
 
   Session() : 
@@ -404,8 +402,9 @@ public:
 
   Session* get_or_add_session(const entity_inst_t& i) {
     Session *s;
-    if (session_map.count(i.name)) {
-      s = session_map[i.name];
+    auto session_map_entry = session_map.find(i.name);
+    if (session_map_entry != session_map.end()) {
+      s = session_map_entry->second;
     } else {
       s = session_map[i.name] = new Session;
       s->info.inst = i;
@@ -512,9 +511,9 @@ public:
     return session_map.count(w);
   }
   Session* get_session(entity_name_t w) {
-    if (session_map.count(w))
-      return session_map[w];
-    return 0;
+    auto session_map_entry = session_map.find(w);
+    return (session_map_entry != session_map.end() ?
+	    session_map_entry-> second : nullptr);
   }
   const Session* get_session(entity_name_t w) const {
     ceph::unordered_map<entity_name_t, Session*>::const_iterator p = session_map.find(w);
@@ -530,9 +529,10 @@ public:
   void touch_session(Session *session);
 
   Session *get_oldest_session(int state) {
-    if (by_state.count(state) == 0 || by_state[state]->empty())
+    auto by_state_entry = by_state.find(state);
+    if (by_state_entry == by_state.end() || by_state_entry->second->empty())
       return 0;
-    return by_state[state]->front();
+    return by_state_entry->second->front();
   }
 
   void dump();

@@ -98,13 +98,6 @@ namespace librbd {
 		    std::set<std::pair<std::string, std::string> > & names);
   int list_children_info(ImageCtx *ictx, librbd::parent_spec parent_spec,
              std::map<std::pair<int64_t, std::string >, std::set<std::string> >& image_info);
-  void create_v2(IoCtx& io_ctx, std::string &imgname, uint64_t size,
-                 int order, uint64_t features, uint64_t stripe_unit,
-                 uint64_t stripe_count, uint8_t journal_order,
-                 uint8_t journal_splay_width, const std::string &journal_pool,
-                 const std::string &non_primary_global_image_id,
-                 const std::string &primary_mirror_uuid,
-                 ContextWQ *op_work_queue, Context *ctx);
   int create(librados::IoCtx& io_ctx, const char *imgname, uint64_t size,
 	     int *order);
   int create(librados::IoCtx& io_ctx, const char *imgname, uint64_t size,
@@ -129,7 +122,6 @@ namespace librbd {
   int get_old_format(ImageCtx *ictx, uint8_t *old);
   int get_size(ImageCtx *ictx, uint64_t *size);
   int get_features(ImageCtx *ictx, uint64_t *features);
-  int update_features(ImageCtx *ictx, uint64_t features, bool enabled);
   int get_overlap(ImageCtx *ictx, uint64_t *overlap);
   int get_parent_info(ImageCtx *ictx, std::string *parent_pool_name,
 		      std::string *parent_name, std::string *parent_snap_name);
@@ -196,8 +188,6 @@ namespace librbd {
   int poll_io_events(ImageCtx *ictx, AioCompletion **comps, int numcomp);
   int metadata_list(ImageCtx *ictx, const string &last, uint64_t max, map<string, bufferlist> *pairs);
   int metadata_get(ImageCtx *ictx, const std::string &key, std::string *value);
-  int metadata_set(ImageCtx *ictx, const std::string &key, const std::string &value);
-  int metadata_remove(ImageCtx *ictx, const std::string &key);
 
   int mirror_mode_get(IoCtx& io_ctx, rbd_mirror_mode_t *mirror_mode);
   int mirror_mode_set(IoCtx& io_ctx, rbd_mirror_mode_t mirror_mode);
@@ -225,17 +215,6 @@ namespace librbd {
   int mirror_image_get_status(ImageCtx *ictx, mirror_image_status_t *status,
 			      size_t status_size);
 
-  // Consistency groups functions
-  int group_create(librados::IoCtx& io_ctx, const char *imgname);
-  int group_remove(librados::IoCtx& io_ctx, const char *group_name);
-  int group_list(librados::IoCtx& io_ctx, std::vector<std::string>& names);
-  int group_image_add(librados::IoCtx& group_ioctx, const char *group_name,
-		      librados::IoCtx& image_ioctx, const char *image_name);
-  int group_image_remove(librados::IoCtx& group_ioctx, const char *group_name,
-			 librados::IoCtx& image_ioctx, const char *image_name);
-  int group_image_list(librados::IoCtx& group_ioctx, const char *group_name,
-		       std::vector<group_image_status_t>& images);
-  int image_get_group(ImageCtx *ictx, group_spec_t *group_spec);
 }
 
 #endif

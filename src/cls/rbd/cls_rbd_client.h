@@ -49,17 +49,24 @@ namespace librbd {
 			     cls::rbd::GroupSpec *uplink);
 
     // low-level interface (mainly for testing)
-    void create_image(librados::ObjectWriteOperation *op, uint64_t size, uint8_t order,
-		      uint64_t features, const std::string &object_prefix);
+    void create_image(librados::ObjectWriteOperation *op, uint64_t size,
+                      uint8_t order, uint64_t features,
+                      const std::string &object_prefix, int64_t data_pool_id);
     int create_image(librados::IoCtx *ioctx, const std::string &oid,
 		     uint64_t size, uint8_t order, uint64_t features,
-		     const std::string &object_prefix);
+		     const std::string &object_prefix, int64_t data_pool_id);
     int get_features(librados::IoCtx *ioctx, const std::string &oid,
 		     snapid_t snap_id, uint64_t *features);
+    void set_features(librados::ObjectWriteOperation *op, uint64_t features,
+                     uint64_t mask);
     int set_features(librados::IoCtx *ioctx, const std::string &oid,
                      uint64_t features, uint64_t mask);
     int get_object_prefix(librados::IoCtx *ioctx, const std::string &oid,
 			  std::string *object_prefix);
+    void get_data_pool_start(librados::ObjectReadOperation *op);
+    int get_data_pool_finish(bufferlist::iterator *it, int64_t *data_pool_id);
+    int get_data_pool(librados::IoCtx *ioctx, const std::string &oid,
+                      int64_t *data_pool_id);
     int get_size(librados::IoCtx *ioctx, const std::string &oid,
 		 snapid_t snap_id, uint64_t *size, uint8_t *order);
     int set_size(librados::IoCtx *ioctx, const std::string &oid,
@@ -151,8 +158,12 @@ namespace librbd {
                              const std::string &start, uint64_t max_return);
     int metadata_list_finish(bufferlist::iterator *it,
                              std::map<std::string, bufferlist> *pairs);
+    void metadata_set(librados::ObjectWriteOperation *op,
+                      const map<std::string, bufferlist> &data);
     int metadata_set(librados::IoCtx *ioctx, const std::string &oid,
                      const map<std::string, bufferlist> &data);
+    void metadata_remove(librados::ObjectWriteOperation *op,
+                         const std::string &key);
     int metadata_remove(librados::IoCtx *ioctx, const std::string &oid,
                         const std::string &key);
     int metadata_get(librados::IoCtx *ioctx, const std::string &oid,

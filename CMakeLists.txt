@@ -257,7 +257,7 @@ find_package(snappy REQUIRED)
 
 #if allocator is set on command line make sure it matches below strings
 if(ALLOCATOR)
-  if(${ALLOCATOR} STREQUAL "tcmalloc")
+  if(${ALLOCATOR} MATCHES "tcmalloc(_minimal)?")
     find_package(gperftools REQUIRED)
     set(HAVE_LIBTCMALLOC ON)
   elseif(${ALLOCATOR} STREQUAL "jemalloc")
@@ -328,6 +328,14 @@ option(WITH_RADOSGW "Rados Gateway is enabled" ON)
 
 #option for CephFS
 option(WITH_CEPHFS "CephFS is enabled" ON)
+
+#option for Mgr
+option(WITH_MGR "ceph-mgr is enabled" ON)
+if(WITH_MGR)
+    set(Python_ADDITIONAL_VERSIONS 2.7)
+    find_package(PythonLibs 2.7 REQUIRED)
+    find_package(Boost COMPONENTS python REQUIRED)
+endif(WITH_MGR)
 
 option(WITH_THREAD_SAFE_RES_QUERY "res_query is thread safe" OFF)
 if(WITH_THREAD_SAFE_RES_QUERY)

@@ -411,6 +411,7 @@ public:
       OP_COLL_HINT = 40, // cid, type, bl
 
       OP_TRY_RENAME = 41,   // oldcid, oldoid, newoid
+      OP_MERGE_DELETE = 42, //move tempobj to base object. cid, oid, newoid, vector of tuple <src offset, dest offset, len>
     };
 
     // Transaction hint type
@@ -690,6 +691,7 @@ public:
 
       case OP_CLONERANGE2:
       case OP_CLONE:
+      case OP_MERGE_DELETE:
         assert(op->cid < cm.size());
         assert(op->oid < om.size());
         assert(op->dest_oid < om.size());
@@ -999,6 +1001,9 @@ public:
       }
       void decode_attrset(map<string,bufferlist>& aset) {
         ::decode(aset, data_bl_p);
+      }
+      void decode_move_info(vector<boost::tuple<uint64_t, uint64_t, uint64_t >>& move_info) {
+        ::decode(move_info, data_bl_p);
       }
       void decode_attrset_bl(bufferlist *pbl) {
 	decode_str_str_map_to_bl(data_bl_p, pbl);
@@ -1337,6 +1342,11 @@ public:
      * The data portion of the destination object receives a copy of a
      * portion of the data from the source object. None of the other
      * three parts of an object is copied from the source.
+     *
+     * The destination object size may be extended to the dstoff + len.
+     *
+     * The source range *must* overlap with the source object data. If it does
+     * not the result is undefined.
      */
     void clone_range(const coll_t& cid, const ghobject_t& oid, ghobject_t noid,
 		     uint64_t srcoff, uint64_t srclen, uint64_t dstoff) {
@@ -1361,6 +1371,28 @@ public:
       }
       data.ops++;
     }
+
+  /*
+   * Move source object to base object.
+   * Data portion is only copied from source object to base object.
+   * The copy is done according to the move_info vector of tuple, which
+   * has information of src_offset, dest_offset and length.
+   * Finally, the source object is deleted.
+   */
+  void move_ranges_destroy_src(
+    const coll_t& cid,
+    const ghobject_t& src_oid,
+    ghobject_t oid,
+    const vector<boost::tuple<uint64_t, uint64_t, uint64_t>>& move_info) {
+    Op* _op = _get_next_op();
+    _op->op = OP_MERGE_DELETE;
+    _op->cid = _get_coll_id(cid);
+    _op->oid = _get_object_id(src_oid);
+    _op->dest_oid = _get_object_id(oid);
+    ::encode(move_info, data_bl);
+    data.ops++;
+  }
+
     /// Create the collection
     void create_collection(const coll_t& cid, int bits) {
       if (use_tbl) {

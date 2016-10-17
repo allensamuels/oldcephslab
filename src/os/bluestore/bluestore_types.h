@@ -151,7 +151,7 @@ struct bluestore_extent_ref_map_t {
   struct record_t {
     uint32_t length;
     uint32_t refs;
-    record_t(uint32_t l=0, uint32_t r=0) : length(l), refs(r) {}
+    record_t(uint64_t l=0, uint32_t r=0) : length(l), refs(r) {}
     void encode(bufferlist& bl) const {
       small_encode_varint_lowz(length, bl);
       small_encode_varint(refs, bl);
@@ -163,10 +163,10 @@ struct bluestore_extent_ref_map_t {
   };
   WRITE_CLASS_ENCODER(record_t)
 
-  map<uint32_t,record_t> ref_map;
+  map<uint64_t,record_t> ref_map;
 
   void _check() const;
-  void _maybe_merge_left(map<uint32_t,record_t>::iterator& p);
+  void _maybe_merge_left(map<uint64_t,record_t>::iterator& p);
 
   void clear() {
     ref_map.clear();
@@ -175,11 +175,11 @@ struct bluestore_extent_ref_map_t {
     return ref_map.empty();
   }
 
-  void get(uint32_t offset, uint32_t len);
-  void put(uint32_t offset, uint32_t len, vector<bluestore_pextent_t> *release);
+  void get(uint64_t offset, uint32_t len);
+  void put(uint64_t offset, uint32_t len, vector<bluestore_pextent_t> *release);
 
-  bool contains(uint32_t offset, uint32_t len) const;
-  bool intersects(uint32_t offset, uint32_t len) const;
+  bool contains(uint64_t offset, uint32_t len) const;
+  bool intersects(uint64_t offset, uint32_t len) const;
 
   void encode(bufferlist& bl) const;
   void decode(bufferlist::iterator& p);
@@ -296,7 +296,20 @@ struct bluestore_blob_t {
 
   int estimate_encoded_size() const {
     // conservative upper bound... fixme
-    return csum_data.length() + extents.size() * 16 + 48;
+    return csum_data.length() + extents.size() * 16 + 24;
+  }
+
+  bool can_split() const {
+    return
+      !has_flag(FLAG_SHARED) &&
+      !has_flag(FLAG_COMPRESSED) &&
+      !has_flag(FLAG_HAS_UNUSED);     // splitting unused set is complex
+  }
+  bool can_split_at(uint32_t blob_offset) const {
+    if (has_csum() &&
+	blob_offset % get_csum_chunk_size() != 0)
+      return false;
+    return true;
   }
 
   void encode(bufferlist& bl) const;
@@ -339,9 +352,9 @@ struct bluestore_blob_t {
   }
 
   /// return chunk (i.e. min readable block) size for the blob
-  uint64_t get_chunk_size(bool csum_enabled, uint64_t dev_block_size) const {
-    return csum_enabled &&
-      has_csum() ? MAX(dev_block_size, get_csum_chunk_size()) : dev_block_size;
+  uint64_t get_chunk_size(uint64_t dev_block_size) const {
+    return has_csum() ?
+      MAX(dev_block_size, get_csum_chunk_size()) : dev_block_size;
   }
   uint32_t get_csum_chunk_size() const {
     return 1 << csum_chunk_order;
@@ -566,6 +579,22 @@ struct bluestore_blob_t {
   int verify_csum(uint64_t b_off, const bufferlist& bl, int* b_bad_off,
 		  uint64_t *bad_csum) const;
 
+  bool can_prune_tail() const {
+    return
+      extents.size() > 1 &&  // if it's all invalid it's not pruning.
+      !extents.back().is_valid() &&
+      !has_unused();
+  }
+  void prune_tail() {
+    extents.pop_back();
+    if (has_csum()) {
+      bufferptr t;
+      t.swap(csum_data);
+      csum_data = bufferptr(t.c_str(),
+			    get_logical_length() / get_csum_chunk_size() *
+			    get_csum_value_size());
+    }
+  }
 };
 WRITE_CLASS_ENCODER(bluestore_blob_t)
 
@@ -575,7 +604,6 @@ ostream& operator<<(ostream& out, const bluestore_blob_t& o);
 /// shared blob state
 struct bluestore_shared_blob_t {
   bluestore_extent_ref_map_t ref_map;  ///< shared blob extents
-  //set<ghobject_t> objects;  ///< objects referencing these shared blocks (debug)
 
   void encode(bufferlist& bl) const;
   void decode(bufferlist::iterator& p);

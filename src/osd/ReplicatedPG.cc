@@ -77,6 +77,23 @@ PGLSFilter::~PGLSFilter()
 {
 }
 
+struct ReplicatedPG::C_OSD_OnApplied : Context {
+  ReplicatedPGRef pg;
+  epoch_t epoch;
+  eversion_t v;
+  C_OSD_OnApplied(
+    ReplicatedPGRef pg,
+    epoch_t epoch,
+    eversion_t v)
+    : pg(pg), epoch(epoch), v(v) {}
+  void finish(int) override {
+    pg->lock();
+    if (!pg->pg_has_reset_since(epoch))
+      pg->op_applied(v);
+    pg->unlock();
+  }
+};
+
 /**
  * The CopyCallback class defines an interface for completions to the
  * copy_start code. Users of the copy infrastructure must implement
@@ -10433,7 +10450,7 @@ void ReplicatedPG::cancel_pull(const hobject_t &soid)
   finish_degraded_object(soid);
 }
 
-void ReplicatedPG::check_recovery_sources(const OSDMapRef osdmap)
+void ReplicatedPG::check_recovery_sources(const OSDMapRef& osdmap)
 {
   /*
    * check that any peers we are planning to (or currently) pulling
@@ -10465,7 +10482,7 @@ void ReplicatedPG::check_recovery_sources(const OSDMapRef osdmap)
   }
 }
 
-void PG::MissingLoc::check_recovery_sources(const OSDMapRef osdmap)
+void PG::MissingLoc::check_recovery_sources(const OSDMapRef& osdmap)
 {
   set<pg_shard_t> now_down;
   for (set<pg_shard_t>::iterator p = missing_loc_sources.begin();

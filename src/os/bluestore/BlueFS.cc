@@ -1279,14 +1279,26 @@ int BlueFS::_flush_and_sync_log(std::unique_lock<std::mutex>& l,
 	     << log_seq_stable << ", done" << dendl;
     return 0;
   }
-  if (log_t.empty()) {
+  if (log_t.empty() && dirty_files.empty()) {
     dout(10) << __func__ << " want_seq " << want_seq
-	     << " " << log_t << " not dirty, no-op" << dendl;
+	     << " " << log_t << " not dirty, dirty_files empty, no-op" << dendl;
     return 0;
   }
+
   uint64_t seq = log_t.seq = ++log_seq;
   assert(want_seq == 0 || want_seq <= seq);
   log_t.uuid = super.uuid;
+
+  // log dirty files
+  auto lsi = dirty_files.find(seq);
+  if (lsi != dirty_files.end()) {
+    dout(20) << __func__ << " " << lsi->second.size() << " dirty_files" << dendl;
+    for (auto &f : lsi->second) {
+      dout(20) << __func__ << "   op_file_update " << f.fnode << dendl;
+      log_t.op_file_update(f.fnode);
+    }
+  }
+
   dout(10) << __func__ << " " << log_t << dendl;
   assert(!log_t.empty());
 
@@ -1332,8 +1344,11 @@ int BlueFS::_flush_and_sync_log(std::unique_lock<std::mutex>& l,
   }
 
   // drop lock while we wait for io
+  list<FS::aio_t> completed_ios;
+  _claim_completed_aios(log_writer, &completed_ios);
   l.unlock();
   wait_for_aio(log_writer);
+  completed_ios.clear();
   flush_bdev();
   l.lock();
 
@@ -1432,7 +1447,6 @@ int BlueFS::_flush_range(FileWriter *h, uint64_t offset, uint64_t length)
   if (must_dirty) {
     h->file->fnode.mtime = ceph_clock_now(NULL);
     assert(h->file->fnode.ino >= 1);
-    log_t.op_file_update(h->file->fnode);
     if (h->file->dirty_seq == 0) {
       h->file->dirty_seq = log_seq + 1;
       dirty_files[h->file->dirty_seq].push_back(*h->file);
@@ -1530,13 +1544,26 @@ int BlueFS::_flush_range(FileWriter *h, uint64_t offset, uint64_t length)
   for (unsigned i = 0; i < MAX_BDEV; ++i) {
     if (bdev[i]) {
       assert(h->iocv[i]);
-      if (h->iocv[i]->has_aios())
+      if (h->iocv[i]->has_pending_aios()) {
         bdev[i]->aio_submit(h->iocv[i]);
+      }
     }
   }
   dout(20) << __func__ << " h " << h << " pos now 0x"
            << std::hex << h->pos << std::dec << dendl;
   return 0;
+}
+
+// we need to retire old completed aios so they don't stick around in
+// memory indefinitely (along with their bufferlist refs).
+void BlueFS::_claim_completed_aios(FileWriter *h, list<FS::aio_t> *ls)
+{
+  for (auto p : h->iocv) {
+    if (p) {
+      ls->splice(ls->end(), p->running_aios);
+    }
+  }
+  dout(10) << __func__ << " got " << ls->size() << " aios" << dendl;
 }
 
 void BlueFS::wait_for_aio(FileWriter *h)
@@ -1624,8 +1651,11 @@ int BlueFS::_fsync(FileWriter *h, std::unique_lock<std::mutex>& l)
   if (r < 0)
      return r;
   uint64_t old_dirty_seq = h->file->dirty_seq;
+  list<FS::aio_t> completed_ios;
+  _claim_completed_aios(h, &completed_ios);
   lock.unlock();
   wait_for_aio(h);
+  completed_ios.clear();
   lock.lock();
   if (old_dirty_seq) {
     uint64_t s = log_seq;
@@ -1662,12 +1692,13 @@ int BlueFS::_allocate(uint8_t id, uint64_t len, vector<bluefs_extent_t> *ev)
   }
   if (r < 0) {
     if (id != BDEV_SLOW) {
-      if (bdev[id])
-	derr << __func__ << " failed to allocate 0x" << std::hex << left
-	     << " on bdev " << (int)id
-	     << ", free 0x" << alloc[id]->get_free()
-	     << "; fallback to bdev " << (int)id + 1
-	     << std::dec << dendl;
+      if (bdev[id]) {
+	dout(1) << __func__ << " failed to allocate 0x" << std::hex << left
+		<< " on bdev " << (int)id
+		<< ", free 0x" << alloc[id]->get_free()
+		<< "; fallback to bdev " << (int)id + 1
+		<< std::dec << dendl;
+      }
       return _allocate(id + 1, len, ev);
     }
     if (bdev[id])
@@ -1842,7 +1873,7 @@ int BlueFS::open_for_write(
 
   if (0 == filename.compare(filename.length() - 4, 4, ".log")) {
     (*h)->writer_type = BlueFS::WRITER_WAL;
-    if (logger) {
+    if (logger && !overwrite) {
       logger->inc(l_bluefs_files_written_wal);
     }
   } else if (0 == filename.compare(filename.length() - 4, 4, ".sst")) {

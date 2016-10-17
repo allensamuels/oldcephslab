@@ -840,6 +840,17 @@ void MemStore::_do_transaction(Transaction& t)
       }
       break;
 
+    case Transaction::OP_MERGE_DELETE:
+      {
+        coll_t cid = i.get_cid(op->cid);
+        ghobject_t oid = i.get_oid(op->oid);
+        ghobject_t noid = i.get_oid(op->dest_oid);
+        vector<boost::tuple<uint64_t, uint64_t, uint64_t>> move_info;
+        i.decode_move_info(move_info);
+        r = _move_ranges_destroy_src(cid, oid, noid, move_info);
+      }
+      break;
+
     case Transaction::OP_MKCOLL:
       {
         coll_t cid = i.get_cid(op->cid);
@@ -1237,6 +1248,43 @@ int MemStore::_clone_range(const coll_t& cid, const ghobject_t& oldoid,
   return len;
 }
 
+/* Move contents of src object according to move_info to base object.
+ * Once the move_info is traversed completely, delete the src object.
+ */
+int MemStore::_move_ranges_destroy_src(const coll_t& cid, const ghobject_t& srcoid,
+			   const ghobject_t& baseoid,
+			   const vector<boost::tuple<uint64_t, uint64_t, uint64_t> > move_info)
+{
+  dout(10) << __func__ << " " << cid << " "  << srcoid << " -> "  << baseoid << dendl;
+  CollectionRef c = get_collection(cid);
+  if (!c)
+    return -ENOENT;
+
+  ObjectRef oo = c->get_object(srcoid);
+  if (!oo)
+    return -ENOENT;
+  ObjectRef no = c->get_or_create_object(baseoid);
+
+  for (unsigned i = 0; i < move_info.size(); ++i) {
+      uint64_t srcoff = move_info[i].get<0>();
+      uint64_t dstoff = move_info[i].get<1>();
+      uint64_t len = move_info[i].get<2>();
+
+      if (srcoff >= oo->get_size())
+        return 0;
+      if (srcoff + len >= oo->get_size())
+        len = oo->get_size() - srcoff;
+
+      const ssize_t old_size = no->get_size();
+      no->clone(oo.get(), srcoff, len, dstoff);
+      used_bytes += (no->get_size() - old_size);
+  }
+
+// delete the src object
+  _remove(cid, srcoid);
+  return 0;
+}
+
 int MemStore::_omap_clear(const coll_t& cid, const ghobject_t &oid)
 {
   dout(10) << __func__ << " " << cid << " " << oid << dendl;
@@ -1496,8 +1544,10 @@ int BufferlistObject::write(uint64_t offset, const bufferlist &src)
   if (get_size() >= offset) {
     newdata.substr_of(data, 0, offset);
   } else {
-    newdata.substr_of(data, 0, get_size());
-    newdata.append(offset - get_size());
+    if (get_size()) {
+      newdata.substr_of(data, 0, get_size());
+    }
+    newdata.append_zero(offset - get_size());
   }
 
   newdata.append(src);
@@ -1652,8 +1702,7 @@ int MemStore::PageSetObject::write(uint64_t offset, const bufferlist &src)
 
   auto page = tls_pages.begin();
 
-  // XXX: cast away the const because bufferlist doesn't have a const_iterator
-  auto p = const_cast<bufferlist&>(src).begin();
+  auto p = src.begin();
   while (len > 0) {
     unsigned page_offset = offset - (*page)->offset;
     unsigned pageoff = data.get_page_size() - page_offset;
@@ -1685,34 +1734,78 @@ int MemStore::PageSetObject::clone(Object *src, uint64_t srcoff,
   PageSet::page_vector dst_pages;
 
   while (len) {
-    const auto count = std::min(len, (uint64_t)src_page_size * 16);
+    // limit to 16 pages at a time so tls_pages doesn't balloon in size
+    auto count = std::min(len, (uint64_t)src_page_size * 16);
     src_data.get_range(srcoff, count, tls_pages);
+
+    // allocate the destination range
+    // TODO: avoid allocating pages for holes in the source range
+    dst_data.alloc_range(srcoff + delta, count, dst_pages);
+    auto dst_iter = dst_pages.begin();
 
     for (auto &src_page : tls_pages) {
       auto sbegin = std::max(srcoff, src_page->offset);
       auto send = std::min(srcoff + count, src_page->offset + src_page_size);
-      dst_data.alloc_range(sbegin + delta, send - sbegin, dst_pages);
+
+      // zero-fill holes before src_page
+      if (srcoff < sbegin) {
+        while (dst_iter != dst_pages.end()) {
+          auto &dst_page = *dst_iter;
+          auto dbegin = std::max(srcoff + delta, dst_page->offset);
+          auto dend = std::min(sbegin + delta, dst_page->offset + dst_page_size);
+          std::fill(dst_page->data + dbegin - dst_page->offset,
+                    dst_page->data + dend - dst_page->offset, 0);
+          if (dend < dst_page->offset + dst_page_size)
+            break;
+          ++dst_iter;
+        }
+        const auto c = sbegin - srcoff;
+        count -= c;
+        len -= c;
+      }
 
       // copy data from src page to dst pages
-      for (auto &dst_page : dst_pages) {
+      while (dst_iter != dst_pages.end()) {
+        auto &dst_page = *dst_iter;
         auto dbegin = std::max(sbegin + delta, dst_page->offset);
         auto dend = std::min(send + delta, dst_page->offset + dst_page_size);
 
         std::copy(src_page->data + (dbegin - delta) - src_page->offset,
                   src_page->data + (dend - delta) - src_page->offset,
                   dst_page->data + dbegin - dst_page->offset);
+        if (dend < dst_page->offset + dst_page_size)
+          break;
+        ++dst_iter;
       }
-      dst_pages.clear(); // drop page refs
+
+      const auto c = send - sbegin;
+      count -= c;
+      len -= c;
+      srcoff = send;
+      dstoff = send + delta;
     }
-    srcoff += count;
-    dstoff += count;
-    len -= count;
     tls_pages.clear(); // drop page refs
+
+    // zero-fill holes after the last src_page
+    if (count > 0) {
+      while (dst_iter != dst_pages.end()) {
+        auto &dst_page = *dst_iter;
+        auto dbegin = std::max(dstoff, dst_page->offset);
+        auto dend = std::min(dstoff + count, dst_page->offset + dst_page_size);
+        std::fill(dst_page->data + dbegin - dst_page->offset,
+                  dst_page->data + dend - dst_page->offset, 0);
+        ++dst_iter;
+      }
+      srcoff += count;
+      dstoff += count;
+      len -= count;
+    }
+    dst_pages.clear(); // drop page refs
   }
 
   // update object size
-  if (data_len < dstoff + len)
-    data_len = dstoff + len;
+  if (data_len < dstoff)
+    data_len = dstoff;
   return 0;
 }
 

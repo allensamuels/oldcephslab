@@ -24,6 +24,10 @@
 #include "common/Timer.h"
 #include "common/WorkQueue.h"
 #include "common/AsyncReserver.h"
+#include "common/ceph_context.h"
+
+#include "mgr/MgrClient.h"
+
 #include "os/ObjectStore.h"
 #include "OSDCap.h" 
  
@@ -845,7 +849,6 @@ public:
   Objecter *objecter;
   Finisher objecter_finisher;
 
-
   // -- Watch --
   Mutex watch_lock;
   SafeTimer watch_timer;
@@ -907,6 +910,7 @@ public:
 	  entity_inst_t())));
   }
 
+private:
   // -- pg recovery and associated throttling --
   Mutex recovery_lock;
   list<pair<epoch_t, PGRef> > awaiting_throttle;
@@ -918,10 +922,24 @@ public:
 #ifdef DEBUG_RECOVERY_OIDS
   map<spg_t, set<hobject_t, hobject_t::BitwiseComparator> > recovery_oids;
 #endif
-  void start_recovery_op(PG *pg, const hobject_t& soid);
-  void finish_recovery_op(PG *pg, const hobject_t& soid, bool dequeue);
   bool _recover_now(uint64_t *available_pushes);
   void _maybe_queue_recovery();
+  void _queue_for_recovery(
+    pair<epoch_t, PGRef> p, uint64_t reserved_pushes) {
+    assert(recovery_lock.is_locked_by_me());
+    pair<PGRef, PGQueueable> to_queue = make_pair(
+      p.second,
+      PGQueueable(
+	PGRecovery(p.first, reserved_pushes),
+	cct->_conf->osd_recovery_cost,
+	cct->_conf->osd_recovery_priority,
+	ceph_clock_now(cct),
+	entity_inst_t()));
+    op_wq.queue(to_queue);
+  }
+public:
+  void start_recovery_op(PG *pg, const hobject_t& soid);
+  void finish_recovery_op(PG *pg, const hobject_t& soid, bool dequeue);
   void release_reserved_pushes(uint64_t pushes) {
     Mutex::Locker l(recovery_lock);
     assert(recovery_ops_reserved >= pushes);
@@ -973,19 +991,6 @@ public:
     _maybe_queue_recovery();
   }
 
-  void _queue_for_recovery(
-    pair<epoch_t, PGRef> p, uint64_t reserved_pushes) {
-    assert(recovery_lock.is_locked_by_me());
-    pair<PGRef, PGQueueable> to_queue = make_pair(
-      p.second,
-      PGQueueable(
-	PGRecovery(p.first, reserved_pushes),
-	cct->_conf->osd_recovery_cost,
-	cct->_conf->osd_recovery_priority,
-	ceph_clock_now(cct),
-	entity_inst_t()));
-    op_wq.queue(to_queue);
-  }
 
   // osd map cache (past osd maps)
   Mutex map_cache_lock;
@@ -1206,6 +1211,7 @@ protected:
   Messenger   *client_messenger;
   Messenger   *objecter_messenger;
   MonClient   *monc; // check the "monc helpers" list before accessing directly
+  MgrClient   mgrc;
   PerfCounters      *logger;
   PerfCounters      *recoverystate_perf;
   ObjectStore *store;
@@ -2132,8 +2138,6 @@ protected:
   void _preboot(epoch_t oldest, epoch_t newest);
   void _send_boot();
   void _collect_metadata(map<string,string> *pmeta);
-  bool _lsb_release_set(char *buf, const char *str, map<string,string> *pm, const char *key);
-  void _lsb_release_parse (map<string,string> *pm);
 
   void start_waiting_for_healthy();
   bool _is_healthy();

@@ -87,9 +87,6 @@ void PG::get(const char* tag)
   ref++;
 #ifdef PG_DEBUG_REFS
   Mutex::Locker l(_ref_id_lock);
-  if (!_tag_counts.count(tag)) {
-    _tag_counts[tag] = 0;
-  }
   _tag_counts[tag]++;
 #endif
 }
@@ -99,10 +96,11 @@ void PG::put(const char* tag)
 #ifdef PG_DEBUG_REFS
   {
     Mutex::Locker l(_ref_id_lock);
-    assert(_tag_counts.count(tag));
-    _tag_counts[tag]--;
-    if (_tag_counts[tag] == 0) {
-      _tag_counts.erase(tag);
+    auto tag_counts_entry = _tag_counts.find(tag);
+    assert(_tag_counts_entry != _tag_counts.end());
+    --tag_counts_entry->second;
+    if (tag_counts_entry->second == 0) {
+      _tag_counts.erase(tag_counts_entry);
     }
   }
 #endif
@@ -950,7 +948,7 @@ void PG::clear_primary_state()
 
   snap_trimq.clear();
 
-  finish_sync_event = 0;  // so that _finish_recvoery doesn't go off in another thread
+  finish_sync_event = 0;  // so that _finish_recovery doesn't go off in another thread
 
   missing_loc.clear();
 
@@ -3411,6 +3409,7 @@ void PG::reg_next_scrub()
   double scrub_min_interval = 0, scrub_max_interval = 0;
   pool.info.opts.get(pool_opts_t::SCRUB_MIN_INTERVAL, &scrub_min_interval);
   pool.info.opts.get(pool_opts_t::SCRUB_MAX_INTERVAL, &scrub_max_interval);
+  assert(scrubber.scrub_reg_stamp == utime_t());
   scrubber.scrub_reg_stamp = osd->reg_pg_scrub(info.pgid,
 					       reg_stamp,
 					       scrub_min_interval,
@@ -3420,8 +3419,10 @@ void PG::reg_next_scrub()
 
 void PG::unreg_next_scrub()
 {
-  if (is_primary())
+  if (is_primary()) {
     osd->unreg_pg_scrub(info.pgid, scrubber.scrub_reg_stamp);
+    scrubber.scrub_reg_stamp = utime_t();
+  }
 }
 
 void PG::sub_op_scrub_map(OpRequestRef op)
@@ -4026,6 +4027,8 @@ void PG::chunky_scrub(ThreadPool::TPHandle &handle)
       case PG::Scrubber::INACTIVE:
         dout(10) << "scrub start" << dendl;
 
+	scrubber.cleaned_meta_map.reset_bitwise(get_sort_bitwise());
+
         publish_stats_to_osd();
         scrubber.epoch_start = info.history.same_interval_since;
         scrubber.active = true;
@@ -4066,54 +4069,54 @@ void PG::chunky_scrub(ThreadPool::TPHandle &handle)
         scrubber.received_maps.clear();
 
         {
-	  hobject_t candidate_end;
-
-          // get the start and end of our scrub chunk
-          //
-          // start and end need to lie on a hash boundary. We test for this by
-          // requesting a list and searching backward from the end looking for a
-          // boundary. If there's no boundary, we request a list after the first
-          // list, and so forth.
-
-          bool boundary_found = false;
+          /* get the start and end of our scrub chunk
+	   *
+	   * Our scrub chunk has an important restriction we're going to need to
+	   * respect. We can't let head or snapdir be start or end.
+	   * Using a half-open interval means that if end == head|snapdir,
+	   * we'd scrub/lock head and the clone right next to head in different
+	   * chunks which would allow us to miss clones created between
+	   * scrubbing that chunk and scrubbing the chunk including head.
+	   * This isn't true for any of the other clones since clones can
+	   * only be created "just to the left of" head.  There is one exception
+	   * to this: promotion of clones which always happens to the left of the
+	   * left-most clone, but promote_object checks the scrubber in that
+	   * case, so it should be ok.  Also, it's ok to "miss" clones at the
+	   * left end of the range if we are a tier because they may legitimately
+	   * not exist (see _scrub).
+	   */
+	  unsigned min = MAX(3, cct->_conf->osd_scrub_chunk_min);
           hobject_t start = scrubber.start;
-          unsigned loop = 0;
-          while (!boundary_found) {
-            vector<hobject_t> objects;
-            ret = get_pgbackend()->objects_list_partial(
-	      start,
-	      cct->_conf->osd_scrub_chunk_min,
-	      cct->_conf->osd_scrub_chunk_max,
-	      &objects,
-	      &candidate_end);
-            assert(ret >= 0);
+	  hobject_t candidate_end;
+	  vector<hobject_t> objects;
+	  ret = get_pgbackend()->objects_list_partial(
+	    start,
+	    min,
+	    MAX(min, cct->_conf->osd_scrub_chunk_max),
+	    &objects,
+	    &candidate_end);
+	  assert(ret >= 0);
 
-            // in case we don't find a boundary: start again at the end
-            start = candidate_end;
-
-            // special case: reached end of file store, implicitly a boundary
-            if (objects.empty()) {
-              break;
-            }
-
-            // search backward from the end looking for a boundary
-            objects.push_back(candidate_end);
-            while (!boundary_found && objects.size() > 1) {
-              hobject_t end = objects.back().get_boundary();
-              objects.pop_back();
-
-              if (objects.back().get_hash() != end.get_hash()) {
-                candidate_end = end;
-                boundary_found = true;
-              }
-            }
-
-            // reset handle once in a while, the search maybe takes long.
-            if (++loop >= g_conf->osd_loop_before_reset_tphandle) {
-              handle.reset_tp_timeout();
-              loop = 0;
-            }
-          }
+	  if (!objects.empty()) {
+	    hobject_t back = objects.back();
+	    while (candidate_end.has_snapset() &&
+		      candidate_end.get_head() == back.get_head()) {
+	      candidate_end = back;
+	      objects.pop_back();
+	      if (objects.empty()) {
+		assert(0 ==
+		       "Somehow we got more than 2 objects which"
+		       "have the same head but are not clones");
+	      }
+	      back = objects.back();
+	    }
+	    if (candidate_end.has_snapset()) {
+	      assert(candidate_end.get_head() != back.get_head());
+	      candidate_end = candidate_end.get_object_boundary();
+	    }
+	  } else {
+	    assert(candidate_end.is_max());
+	  }
 
 	  if (!_range_available_for_scrub(scrubber.start, candidate_end)) {
 	    // we'll be requeued by whatever made us unavailable for scrub
@@ -4138,7 +4141,8 @@ void PG::chunky_scrub(ThreadPool::TPHandle &handle)
           }
         }
 
-        // ask replicas to wait until last_update_applied >= scrubber.subset_last_update and then scan
+        // ask replicas to wait until
+        // last_update_applied >= scrubber.subset_last_update and then scan
         scrubber.waiting_on_whom.insert(pg_whoami);
         ++scrubber.waiting_on;
 
@@ -4285,7 +4289,7 @@ void PG::scrub_compare_maps()
   dout(10) << __func__ << " has maps, analyzing" << dendl;
 
   // construct authoritative scrub map for type specific scrubbing
-  ScrubMap authmap(scrubber.primary_scrubmap);
+  scrubber.cleaned_meta_map.insert(scrubber.primary_scrubmap);
   map<hobject_t, pair<uint32_t, uint32_t>, hobject_t::BitwiseComparator> missing_digest;
 
   if (acting.size() > 1) {
@@ -4347,13 +4351,34 @@ void PG::scrub_compare_maps()
     for (map<hobject_t, list<pg_shard_t>, hobject_t::BitwiseComparator>::iterator i = authoritative.begin();
 	 i != authoritative.end();
 	 ++i) {
-      authmap.objects.erase(i->first);
-      authmap.objects.insert(*(maps[i->second.back()]->objects.find(i->first)));
+      scrubber.cleaned_meta_map.objects.erase(i->first);
+      scrubber.cleaned_meta_map.objects.insert(
+	*(maps[i->second.back()]->objects.find(i->first))
+	);
     }
   }
 
+  ScrubMap for_meta_scrub(get_sort_bitwise());
+  if (scrubber.end.is_max() ||
+      scrubber.cleaned_meta_map.objects.empty()) {
+    scrubber.cleaned_meta_map.swap(for_meta_scrub);
+  } else {
+    auto iter = scrubber.cleaned_meta_map.objects.end();
+    --iter; // not empty, see if clause
+    auto begin = scrubber.cleaned_meta_map.objects.begin();
+    while (iter != begin) {
+      auto next = iter--;
+      if (next->first.get_head() != iter->first.get_head()) {
+	++iter;
+	break;
+      }
+    }
+    for_meta_scrub.objects.insert(begin, iter);
+    scrubber.cleaned_meta_map.objects.erase(begin, iter);
+  }
+
   // ok, do the pg-type specific scrubbing
-  _scrub(authmap, missing_digest);
+  _scrub(for_meta_scrub, missing_digest);
   if (!scrubber.store->empty()) {
     if (state_test(PG_STATE_REPAIR)) {
       dout(10) << __func__ << ": discarding scrub results" << dendl;

@@ -38,7 +38,6 @@ class MAuthRotating;
 class MPing;
 class LogClient;
 class AuthSupported;
-class AuthAuthorizeHandlerRegistry;
 class AuthMethodList;
 class Messenger;
 // class RotatingKeyRing;
@@ -126,10 +125,6 @@ private:
   SafeTimer timer;
   Finisher finisher;
 
-  // Added to support session signatures.  PLR
-
-  AuthAuthorizeHandlerRegistry *authorize_handler_registry;
-
   bool initialized;
   bool no_keyring_disabled_cephx;
 
@@ -210,14 +205,19 @@ private:
   void handle_subscribe_ack(MMonSubscribeAck* m);
 
   bool _sub_want(const string &what, version_t start, unsigned flags) {
-    if ((sub_new.count(what) == 0 &&
-	 sub_sent.count(what) &&
-	 sub_sent[what].start == start &&
-	 sub_sent[what].flags == flags) ||
-	(sub_new.count(what) &&
-	 sub_new[what].start == start &&
-	 sub_new[what].flags == flags))
+    auto sub = sub_new.find(what);
+    if (sub != sub_new.end() &&
+        sub->second.start == start &&
+        sub->second.flags == flags) {
       return false;
+    } else {
+      sub = sub_sent.find(what);
+      if (sub != sub_sent.end() &&
+	  sub->second.start == start &&
+	  sub->second.flags == flags)
+	return false;
+    }
+
     sub_new[what].start = start;
     sub_new[what].flags = flags;
     return true;
@@ -370,6 +370,7 @@ public:
   }
 
   void set_messenger(Messenger *m) { messenger = m; }
+  entity_addr_t get_myaddr() const { return messenger->get_myaddr(); }
 
   void send_auth_message(Message *m) {
     _send_mon_message(m, true);
@@ -434,6 +435,22 @@ public:
    * @return (via context) 0 on success, -EAGAIN if we need to resubmit our request
    */
   void get_version(string map, version_t *newest, version_t *oldest, Context *onfinish);
+
+  /**
+   * Run a callback within our lock, with a reference
+   * to the MonMap
+   */
+  template<typename Callback, typename...Args>
+  auto with_monmap(Callback&& cb, Args&&...args) ->
+    typename std::enable_if<
+      std::is_void<
+    decltype(cb(const_cast<const MonMap&>(monmap),
+		std::forward<Args>(args)...))>::value,
+      void>::type {
+    Mutex::Locker l(monc_lock);
+    std::forward<Callback>(cb)(const_cast<const MonMap&>(monmap),
+			       std::forward<Args>(args)...);
+  }
 
 private:
   struct version_req_d {

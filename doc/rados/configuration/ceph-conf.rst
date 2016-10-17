@@ -227,6 +227,11 @@ Ceph supports the following metavariables:
 :Description: Expands to ``$type.$id``.
 :Example: ``/var/run/ceph/$cluster-$name.asok``
 
+``$pid``
+
+:Description: Expands to daemon pid.
+:Example: ``/var/run/ceph/$cluster-$name-$pid.asok``
+
 
 .. _ceph-conf-common-settings:
 
@@ -520,8 +525,8 @@ To invoke a cluster other than the default ``ceph`` cluster, use the
 	ceph -c openstack.conf health
 
 
-.. _Hardware Recommendations: ../../../install/hardware-recommendations
-.. _hardware recommendations: ../../../install/hardware-recommendations
+.. _Hardware Recommendations: ../../../start/hardware-recommendations
+.. _hardware recommendations: ../../../start/hardware-recommendations
 .. _Network Configuration Reference: ../network-config-ref
 .. _OSD Config Reference: ../osd-config-ref
 .. _Configuring Monitor/OSD Interaction: ../mon-osd-interaction

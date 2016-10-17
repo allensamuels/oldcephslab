@@ -23,6 +23,7 @@
 #include "librbd/AioCompletion.h"
 #include "librbd/AioImageRequestWQ.h"
 #include "cls/rbd/cls_rbd_client.h"
+#include "librbd/Group.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/ImageState.h"
 #include "librbd/internal.h"
@@ -749,7 +750,7 @@ namespace librbd {
   {
     ImageCtx *ictx = reinterpret_cast<ImageCtx *>(ctx);
     tracepoint(librbd, update_features_enter, ictx, features, enabled);
-    int r = librbd::update_features(ictx, features, enabled);
+    int r = ictx->operations->update_features(features, enabled);
     tracepoint(librbd, update_features_exit, r);
     return r;
   }
@@ -779,6 +780,28 @@ namespace librbd {
     int r = librbd::get_overlap(ictx, overlap);
     tracepoint(librbd, get_overlap_exit, r, *overlap);
     return r;
+  }
+
+  int Image::get_id(std::string *id)
+  {
+    ImageCtx *ictx = reinterpret_cast<ImageCtx *>(ctx);
+    if (ictx->old_format) {
+      return -EINVAL;
+    }
+    *id = ictx->id;
+    return 0;
+  }
+
+  std::string Image::get_block_name_prefix()
+  {
+    ImageCtx *ictx = reinterpret_cast<ImageCtx *>(ctx);
+    return ictx->object_prefix;
+  }
+
+  int64_t Image::get_data_pool_id()
+  {
+    ImageCtx *ictx = reinterpret_cast<ImageCtx *>(ctx);
+    return ictx->data_ctx.get_id();
   }
 
   int Image::parent_info(string *parent_pool_name, string *parent_name,
@@ -1398,7 +1421,7 @@ namespace librbd {
   {
     ImageCtx *ictx = (ImageCtx *)ctx;
     tracepoint(librbd, metadata_set_enter, ictx, key.c_str(), value.c_str());
-    int r = librbd::metadata_set(ictx, key, value);
+    int r = ictx->operations->metadata_set(key, value);
     tracepoint(librbd, metadata_set_exit, r);
     return r;
   }
@@ -1407,7 +1430,7 @@ namespace librbd {
   {
     ImageCtx *ictx = (ImageCtx *)ctx;
     tracepoint(librbd, metadata_remove_enter, ictx, key.c_str());
-    int r = librbd::metadata_remove(ictx, key);
+    int r = ictx->operations->metadata_remove(key);
     tracepoint(librbd, metadata_remove_exit, r);
     return r;
   }
@@ -2163,7 +2186,7 @@ extern "C" int rbd_update_features(rbd_image_t image, uint64_t features,
   librbd::ImageCtx *ictx = reinterpret_cast<librbd::ImageCtx *>(image);
   bool features_enabled = enabled != 0;
   tracepoint(librbd, update_features_enter, ictx, features, features_enabled);
-  int r = librbd::update_features(ictx, features, features_enabled);
+  int r = ictx->operations->update_features(features, features_enabled);
   tracepoint(librbd, update_features_exit, r);
   return r;
 }
@@ -2193,6 +2216,40 @@ extern "C" int rbd_get_overlap(rbd_image_t image, uint64_t *overlap)
   int r = librbd::get_overlap(ictx, overlap);
   tracepoint(librbd, get_overlap_exit, r, *overlap);
   return r;
+}
+
+extern "C" int rbd_get_id(rbd_image_t image, char *id, size_t id_len)
+{
+  librbd::ImageCtx *ictx = reinterpret_cast<librbd::ImageCtx *>(image);
+  if (ictx->old_format) {
+    return -EINVAL;
+  }
+  if (ictx->id.size() >= id_len) {
+    return -ERANGE;
+  }
+
+  strncpy(id, ictx->id.c_str(), id_len - 1);
+  id[id_len - 1] = '\0';
+  return 0;
+}
+
+extern "C" int rbd_get_block_name_prefix(rbd_image_t image, char *prefix,
+                                         size_t prefix_len)
+{
+  librbd::ImageCtx *ictx = reinterpret_cast<librbd::ImageCtx *>(image);
+  if (ictx->object_prefix.size() >= prefix_len) {
+    return -ERANGE;
+  }
+
+  strncpy(prefix, ictx->object_prefix.c_str(), prefix_len - 1);
+  prefix[prefix_len - 1] = '\0';
+  return 0;
+}
+
+extern "C" int64_t rbd_get_data_pool_id(rbd_image_t image)
+{
+  librbd::ImageCtx *ictx = reinterpret_cast<librbd::ImageCtx *>(image);
+  return ictx->data_ctx.get_id();
 }
 
 extern "C" int rbd_get_parent_info(rbd_image_t image,
@@ -2881,7 +2938,7 @@ extern "C" int rbd_metadata_set(rbd_image_t image, const char *key, const char *
 {
   librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
   tracepoint(librbd, metadata_set_enter, ictx, key, value);
-  int r = librbd::metadata_set(ictx, key, value);
+  int r = ictx->operations->metadata_set(key, value);
   tracepoint(librbd, metadata_set_exit, r);
   return r;
 }
@@ -2890,7 +2947,7 @@ extern "C" int rbd_metadata_remove(rbd_image_t image, const char *key)
 {
   librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
   tracepoint(librbd, metadata_remove_enter, ictx, key);
-  int r = librbd::metadata_remove(ictx, key);
+  int r = ictx->operations->metadata_remove(key);
   tracepoint(librbd, metadata_remove_exit, r);
   return r;
 }

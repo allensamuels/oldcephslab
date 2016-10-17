@@ -76,11 +76,7 @@ if(no_yasm)
   message(STATUS " we do not have a modern/working yasm")
 else(no_yasm)
   message(STATUS " we have a modern and working yasm")
-  execute_process(
-    COMMAND uname -m
-    OUTPUT_VARIABLE arch
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
-  if(arch MATCHES "amd64|x86_64")
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "amd64|x86_64")
     message(STATUS " we are x84_64")
     set(save_quiet ${CMAKE_REQUIRED_QUIET})
     set(CMAKE_REQUIRED_QUIET true)
@@ -108,9 +104,9 @@ else(no_yasm)
     else(not_arch_x32)
       message(STATUS " we are x32; no yasm for you")
     endif(not_arch_x32)
-  else(arch MATCHES "amd64|x86_64")
+  else(CMAKE_SYSTEM_PROCESSOR MATCHES "amd64|x86_64")
     message(STATUS " we are not x86_64 && !x32")
-  endif(arch MATCHES "amd64|x86_64")
+  endif(CMAKE_SYSTEM_PROCESSOR MATCHES "amd64|x86_64")
 endif(no_yasm)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -ftemplate-depth-1024 -Wno-invalid-offsetof")
@@ -318,6 +314,7 @@ add_library(common_texttable_obj OBJECT
 set(libcommon_files
   ${CMAKE_BINARY_DIR}/src/include/ceph_ver.h
   ceph_ver.c
+  common/AsyncOpTracker.cc
   common/DecayCounter.cc
   common/LogClient.cc
   common/LogEntry.cc
@@ -368,6 +365,7 @@ set(libcommon_files
   mon/MonCap.cc
   mon/MonClient.cc
   mon/MonMap.cc
+  mgr/MgrClient.cc
   msg/simple/Accepter.cc
   msg/DispatchQueue.cc
   msg/Message.cc
@@ -487,7 +485,6 @@ set_source_files_properties(${CMAKE_SOURCE_DIR}/src/ceph_ver.c
 include(SIMDExt)
 if(HAVE_ARMV8_CRC)
   add_library(common_crc_aarch64 STATIC common/crc32c_aarch64.c)
-  set_target_properties(common_crc_aarch64 PROPERTIES COMPILE_FLAGS "${CMAKE_C_FLAGS} ${ARM_CRC_FLAGS}")
   target_link_libraries(common common_crc_aarch64)
 endif(HAVE_ARMV8_CRC)
 
@@ -498,6 +495,8 @@ if(${WITH_LTTNG})
 endif(${WITH_LTTNG})
 
 add_subdirectory(global)
+
+add_subdirectory(lua)
 
 # rados object classes
 add_subdirectory(cls)
@@ -510,6 +509,27 @@ add_library(rados_snap_set_diff_obj OBJECT librados/snap_set_diff.cc)
 add_subdirectory(include)
 add_subdirectory(librados)
 add_subdirectory(libradosstriper)
+
+if (WITH_MGR)
+  set(mgr_srcs
+      ceph_mgr.cc
+      mon/PGMap.cc
+      mgr/DaemonState.cc
+      mgr/DaemonServer.cc
+      mgr/ClusterState.cc
+      mgr/PyModules.cc
+      mgr/PyFormatter.cc
+      mgr/PyState.cc
+      mgr/MgrPyModule.cc
+      mgr/MgrStandby.cc
+      mgr/Mgr.cc)
+  add_executable(ceph-mgr ${mgr_srcs}
+                 $<TARGET_OBJECTS:heap_profiler_objs>)
+  target_include_directories(ceph-mgr PRIVATE "${PYTHON_INCLUDE_DIRS}")
+  target_link_libraries(ceph-mgr mds osdc global
+      -lboost_python ${PYTHON_LIBRARIES} ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
+  install(TARGETS ceph-mgr DESTINATION bin)
+endif (WITH_MGR)
 
 set(librados_config_srcs
   librados-config.cc)
@@ -840,6 +860,7 @@ add_subdirectory(brag)
 add_custom_target(vstart DEPENDS
     ceph-osd
     ceph-mon
+    ceph-mgr
     ceph-authtool
     ceph-conf
     monmaptool

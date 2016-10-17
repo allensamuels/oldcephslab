@@ -97,6 +97,9 @@ OPTION(xio_max_conns_per_portal, OPT_INT, 32) // max xio_connections per portal/
 OPTION(xio_transport_type, OPT_STR, "rdma") // xio transport type: {rdma or tcp}
 OPTION(xio_max_send_inline, OPT_INT, 512) // xio maximum threshold to send inline
 
+OPTION(compressor_zlib_isal, OPT_BOOL, false)
+OPTION(compressor_zlib_level, OPT_INT, 5) //regular zlib compression level, not applicable to isa-l optimized version
+
 OPTION(async_compressor_enabled, OPT_BOOL, false)
 OPTION(async_compressor_type, OPT_STR, "snappy")
 OPTION(async_compressor_threads, OPT_INT, 2)
@@ -158,6 +161,8 @@ SUBSYS(leveldb, 4, 5)
 SUBSYS(memdb, 4, 5)
 SUBSYS(kinetic, 1, 5)
 SUBSYS(fuse, 1, 5)
+SUBSYS(mgr, 1, 5)
+SUBSYS(mgrc, 1, 5)
 
 OPTION(key, OPT_STR, "")
 OPTION(keyfile, OPT_STR, "")
@@ -231,7 +236,7 @@ OPTION(mon_osd_adjust_down_out_interval, OPT_BOOL, true)  // true if we should s
 OPTION(mon_osd_auto_mark_in, OPT_BOOL, false)         // mark any booting osds 'in'
 OPTION(mon_osd_auto_mark_auto_out_in, OPT_BOOL, true) // mark booting auto-marked-out osds 'in'
 OPTION(mon_osd_auto_mark_new_in, OPT_BOOL, true)      // mark booting new osds 'in'
-OPTION(mon_osd_down_out_interval, OPT_INT, 300) // seconds
+OPTION(mon_osd_down_out_interval, OPT_INT, 600) // seconds
 OPTION(mon_osd_down_out_subtree_limit, OPT_STR, "rack")   // smallest crush unit/type that we will not automatically mark out
 OPTION(mon_osd_min_up_ratio, OPT_DOUBLE, .3)    // min osds required to be up to mark things down
 OPTION(mon_osd_min_in_ratio, OPT_DOUBLE, .3)   // min osds required to be in to mark things out
@@ -414,6 +419,7 @@ OPTION(fuse_debug, OPT_BOOL, false)
 OPTION(fuse_multithreaded, OPT_BOOL, true)
 OPTION(fuse_require_active_mds, OPT_BOOL, true) // if ceph_fuse requires active mds server
 OPTION(fuse_syncfs_on_mksnap, OPT_BOOL, true)
+OPTION(fuse_set_user_groups, OPT_BOOL, false) // if ceph_fuse fills in group lists or not
 
 OPTION(client_try_dentry_invalidate, OPT_BOOL, true) // the client should try to use dentry invaldation instead of remounting, on kernels it believes that will work for
 OPTION(client_die_on_failed_remount, OPT_BOOL, true)
@@ -960,8 +966,9 @@ OPTION(bluestore_block_wal_path, OPT_STR, "")
 OPTION(bluestore_block_wal_size, OPT_U64, 96 * 1024*1024) // rocksdb wal
 OPTION(bluestore_block_wal_create, OPT_BOOL, false)
 OPTION(bluestore_block_preallocate_file, OPT_BOOL, false) //whether preallocate space if block/db_path/wal_path is file rather that block device.
-OPTION(bluestore_csum, OPT_BOOL, true)
-OPTION(bluestore_csum_type, OPT_STR, "crc32c")
+OPTION(bluestore_precondition_bluefs, OPT_U64, 128*1024*1024)  // write this much data at mkfs
+OPTION(bluestore_precondition_bluefs_block, OPT_U64, 1048576)
+OPTION(bluestore_csum_type, OPT_STR, "crc32c") // none|xxhash32|xxhash64|crc32c|crc32c_16|crc32c_8
 OPTION(bluestore_min_csum_block, OPT_U32, 4096)
 OPTION(bluestore_max_csum_block, OPT_U32, 64*1024)
 OPTION(bluestore_min_alloc_size, OPT_U32, 0)
@@ -970,8 +977,11 @@ OPTION(bluestore_min_alloc_size_ssd, OPT_U32, 4*1024)
 OPTION(bluestore_max_alloc_size, OPT_U32, 0)
 OPTION(bluestore_compression, OPT_STR, "none")  // force|aggressive|passive|none
 OPTION(bluestore_compression_algorithm, OPT_STR, "snappy")
-OPTION(bluestore_compression_min_blob_size, OPT_U32, 256*1024)
-OPTION(bluestore_compression_max_blob_size, OPT_U32, 4*1024*1024)
+OPTION(bluestore_compression_min_blob_size, OPT_U32, 128*1024)
+OPTION(bluestore_compression_max_blob_size, OPT_U32, 512*1024)
+OPTION(bluestore_max_blob_size, OPT_U32, 512*1024)
+OPTION(bluestore_gc_max_blob_depth, OPT_U32, 3)
+OPTION(bluestore_gc_merge_data, OPT_BOOL, true)
 /*
  * Require the net gain of compression at least to be at this ratio,
  * otherwise we don't compress.
@@ -981,11 +991,11 @@ OPTION(bluestore_compression_required_ratio, OPT_DOUBLE, .875)
 OPTION(bluestore_extent_map_shard_max_size, OPT_U32, 1200)
 OPTION(bluestore_extent_map_shard_target_size, OPT_U32, 500)
 OPTION(bluestore_extent_map_shard_min_size, OPT_U32, 150)
+OPTION(bluestore_extent_map_shard_target_size_slop, OPT_DOUBLE, .2)
 OPTION(bluestore_extent_map_inline_shard_prealloc_size, OPT_U32, 256)
 OPTION(bluestore_cache_type, OPT_STR, "2q")   // lru, 2q
-OPTION(bluestore_onode_cache_size, OPT_U32, 16*1024)
+OPTION(bluestore_onode_cache_size, OPT_U32, 4*1024)
 OPTION(bluestore_buffer_cache_size, OPT_U32, 512*1024*1024)
-OPTION(bluestore_shared_blob_hash_table_size_ratio, OPT_FLOAT, 2)  // multiple of onode_cache_size
 OPTION(bluestore_kvbackend, OPT_STR, "rocksdb")
 OPTION(bluestore_allocator, OPT_STR, "bitmap")     // stupid | bitmap
 OPTION(bluestore_freelist_type, OPT_STR, "bitmap") // extent | bitmap
@@ -1012,12 +1022,14 @@ OPTION(bluestore_overlay_max_length, OPT_INT, 65536)
 OPTION(bluestore_overlay_max, OPT_INT, 0)
 OPTION(bluestore_clone_cow, OPT_BOOL, false)  // do copy-on-write for clones
 OPTION(bluestore_default_buffered_read, OPT_BOOL, true)
+OPTION(bluestore_default_buffered_write, OPT_BOOL, false)
 OPTION(bluestore_debug_misc, OPT_BOOL, false)
 OPTION(bluestore_debug_no_reuse_blocks, OPT_BOOL, false)
 OPTION(bluestore_debug_small_allocations, OPT_INT, 0)
 OPTION(bluestore_debug_freelist, OPT_BOOL, false)
 OPTION(bluestore_debug_prefill, OPT_FLOAT, 0)
 OPTION(bluestore_debug_prefragment_max, OPT_INT, 1048576)
+OPTION(bluestore_debug_inject_read_err, OPT_BOOL, false)
 OPTION(bluestore_inject_wal_apply_delay, OPT_FLOAT, 0)
 OPTION(bluestore_shard_finishers, OPT_BOOL, false)
 
@@ -1106,6 +1118,7 @@ OPTION(filestore_fsync_flushes_journal_data, OPT_BOOL, false)
 OPTION(filestore_fiemap, OPT_BOOL, false)     // (try to) use fiemap
 OPTION(filestore_punch_hole, OPT_BOOL, false)
 OPTION(filestore_seek_data_hole, OPT_BOOL, false)     // (try to) use seek_data/hole
+OPTION(filestore_splice, OPT_BOOL, false)
 OPTION(filestore_fadvise, OPT_BOOL, true)
 //collect device partition information for management application to use
 OPTION(filestore_collect_device_partition_information, OPT_BOOL, true)
@@ -1247,7 +1260,8 @@ OPTION(rbd_default_features, OPT_INT, 61)   // only applies to format 2 images
 					    // +1 for layering, +2 for stripingv2,
 					    // +4 for exclusive lock, +8 for object map
 					    // +16 for fast-diff, +32 for deep-flatten,
-					    // +64 for journaling
+					    // +64 for journaling, +128 for data pool
+OPTION(rbd_default_data_pool, OPT_STR, "") // optional default pool for storing image data blocks
 
 OPTION(rbd_default_map_options, OPT_STR, "") // default rbd map -o / --options
 
@@ -1318,6 +1332,7 @@ OPTION(rgw_lifecycle_thread, OPT_INT, 1) //start lifecycle thread number per rad
 OPTION(rgw_lifecycle_work_time, OPT_STR, "00:00-06:00") //job process lc  at 00:00-06:00s
 OPTION(rgw_lc_lock_max_time, OPT_INT, 60)  // total run time for a single gc processor work
 OPTION(rgw_lc_max_objs, OPT_INT, 32)
+OPTION(rgw_lc_debug_interval, OPT_INT, -1)  // Debug run interval, in seconds
 OPTION(rgw_script_uri, OPT_STR, "") // alternative value for SCRIPT_URI if not set in request
 OPTION(rgw_request_uri, OPT_STR,  "") // alternative value for REQUEST_URI if not set in request
 OPTION(rgw_swift_url, OPT_STR, "")             // the swift url, being published by the internal swift auth
@@ -1359,6 +1374,8 @@ OPTION(rgw_ldap_dnattr, OPT_STR, "uid")
 OPTION(rgw_ldap_secret, OPT_STR, "/etc/openldap/secret")
 /* rgw_s3_auth_use_ldap  use LDAP for RGW auth? */
 OPTION(rgw_s3_auth_use_ldap, OPT_BOOL, false)
+/* rgw_ldap_searchfilter  LDAP search filter */
+OPTION(rgw_ldap_searchfilter, OPT_STR, "")
 
 OPTION(rgw_admin_entry, OPT_STR, "admin")  // entry point for which a url is considered an admin request
 OPTION(rgw_enforce_swift_acls, OPT_BOOL, true)
@@ -1483,6 +1500,7 @@ OPTION(rgw_num_async_rados_threads, OPT_INT, 32) // num of threads to use for as
 OPTION(rgw_md_notify_interval_msec, OPT_INT, 200) // metadata changes notification interval to followers
 OPTION(rgw_run_sync_thread, OPT_BOOL, true) // whether radosgw (not radosgw-admin) spawns the sync thread
 OPTION(rgw_sync_lease_period, OPT_INT, 120) // time in second for lease that rgw takes on a specific log (or log shard)
+OPTION(rgw_sync_log_trim_interval, OPT_INT, 1200) // time in seconds between attempts to trim sync logs
 
 OPTION(rgw_sync_data_inject_err_probability, OPT_DOUBLE, 0) // range [0, 1]
 OPTION(rgw_sync_meta_inject_err_probability, OPT_DOUBLE, 0) // range [0, 1]
@@ -1493,8 +1511,15 @@ OPTION(rgw_period_push_interval, OPT_DOUBLE, 2) // seconds to wait before retryi
 OPTION(rgw_period_push_interval_max, OPT_DOUBLE, 30) // maximum interval after exponential backoff
 
 OPTION(rgw_swift_versioning_enabled, OPT_BOOL, false) // whether swift object versioning feature is enabled
+OPTION(mgr_module_path, OPT_STR, CEPH_PKGLIBDIR "/mgr") // where to load python modules from
+OPTION(mgr_modules, OPT_STR, "rest")  // Which modules to load
+OPTION(mgr_data, OPT_STR, "/var/lib/ceph/mgr/$cluster-$id") // where to find keyring etc
+OPTION(mgr_beacon_period, OPT_INT, 5)  // How frequently to send beacon
+OPTION(mon_mgr_beacon_grace, OPT_INT, 30)  // How long to wait to failover
 
 OPTION(rgw_list_bucket_min_readahead, OPT_INT, 1000) // minimum number of entries to read from rados for bucket listing
+
+OPTION(rgw_rest_getusage_op_compat, OPT_BOOL, false) // dump description of total stats for s3 GetUsage API
 
 OPTION(mutex_perf_counter, OPT_BOOL, false) // enable/disable mutex perf counter
 OPTION(throttler_perf_counter, OPT_BOOL, true) // enable/disable throttler perf counter
@@ -1506,7 +1531,7 @@ OPTION(rgw_torrent_createby, OPT_STR, "")    // torrent field created by
 OPTION(rgw_torrent_comment, OPT_STR, "")    // torrent field comment
 OPTION(rgw_torrent_encoding, OPT_STR, "")    // torrent field encoding
 OPTION(rgw_torrent_origin, OPT_STR, "")    // torrent origin
-OPTION(rgw_torrent_sha_unit, OPT_INT, 512*1024)    //torrent field piece length 521K
+OPTION(rgw_torrent_sha_unit, OPT_INT, 512*1024)    // torrent field piece length 512K
 
 // This will be set to true when it is safe to start threads.
 // Once it is true, it will never change.

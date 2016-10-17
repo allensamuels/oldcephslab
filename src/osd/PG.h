@@ -420,7 +420,7 @@ public:
       );
 
     /// Uses osdmap to update structures for now down sources
-    void check_recovery_sources(const OSDMapRef osdmap);
+    void check_recovery_sources(const OSDMapRef& osdmap);
 
     /// Call when hoid is no longer missing in acting set
     void recovered(const hobject_t &hoid) {
@@ -1120,7 +1120,7 @@ public:
   void cancel_recovery();
   void clear_recovery_state();
   virtual void _clear_recovery_state() = 0;
-  virtual void check_recovery_sources(const OSDMapRef newmap) = 0;
+  virtual void check_recovery_sources(const OSDMapRef& newmap) = 0;
   void start_recovery_op(const hobject_t& soid);
   void finish_recovery_op(const hobject_t& soid, bool dequeue=false);
 
@@ -1165,6 +1165,9 @@ public:
 
     // Map from object with errors to good peers
     map<hobject_t, list<pair<ScrubMap::object, pg_shard_t> >, hobject_t::BitwiseComparator> authoritative;
+
+    // Cleaned map pending snap metadata scrub
+    ScrubMap cleaned_meta_map;
 
     // digest updates which we are waiting on
     int num_digest_updates_pending;
@@ -1264,6 +1267,7 @@ public:
       missing.clear();
       authoritative.clear();
       num_digest_updates_pending = 0;
+      cleaned_meta_map = ScrubMap();
     }
 
     void create_results(const hobject_t& obj);
