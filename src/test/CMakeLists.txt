@@ -698,6 +698,7 @@ add_executable(unittest_arch
 add_ceph_unittest(unittest_arch ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_arch)
 target_link_libraries(unittest_arch global)
 
+<<<<<<< HEAD
 # unittest_enc_dec
 add_executable(unittest_enc_dec
   test_enc_dec.cc
@@ -725,6 +726,12 @@ add_executable(unittest_mempool
   )
 add_ceph_unittest(unittest_mempool ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_mempool)
 target_link_libraries(unittest_mempool global)
+# unittest_denc
+add_executable(unittest_denc
+  test_denc.cc
+  )
+add_ceph_unittest(unittest_denc ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_denc)
+target_link_libraries(unittest_denc os global)
 
 # unittest_crypto
 add_executable(unittest_crypto

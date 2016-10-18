@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 2.8.11)
 
 project(ceph)
-set(VERSION "10.2.1")
+set(VERSION 11.0.2)
 
 if(POLICY CMP0046)
   # Tweak policies (this one disables "missing" dependency warning)
@@ -240,13 +240,6 @@ find_package(leveldb REQUIRED)
 find_file(HAVE_LEVELDB_FILTER_POLICY leveldb/filter_policy.h PATHS ${LEVELDB_INCLUDE_DIR})
 endif(${WITH_LEVELDB})
 
-option(WITH_EXPAT "EXPAT is here" ON)
-if(${WITH_EXPAT})
-find_package(EXPAT REQUIRED)
-endif(${WITH_EXPAT})
-
-find_package(fcgi REQUIRED)
-
 find_package(atomic_ops REQUIRED)
 message(STATUS "${ATOMIC_OPS_LIBRARIES}")
 if(NOT ${ATOMIC_OPS_FOUND})
@@ -325,6 +318,10 @@ endif(WITH_XIO)
 
 #option for RGW
 option(WITH_RADOSGW "Rados Gateway is enabled" ON)
+if(WITH_RADOSGW)
+  find_package(EXPAT REQUIRED)
+  find_package(fcgi REQUIRED)
+endif(WITH_RADOSGW)
 
 #option for CephFS
 option(WITH_CEPHFS "CephFS is enabled" ON)
