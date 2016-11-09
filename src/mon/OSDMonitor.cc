@@ -55,6 +55,8 @@
 #include "common/errno.h"
 
 #include "erasure-code/ErasureCodePlugin.h"
+#include "compressor/Compressor.h"
+#include "common/Checksummer.h"
 
 #include "include/compat.h"
 #include "include/assert.h"
@@ -130,7 +132,8 @@ void OSDMonitor::create_initial()
   newmap.set_flag(CEPH_OSDMAP_REQUIRE_KRAKEN);
 
   // encode into pending incremental
-  newmap.encode(pending_inc.fullmap, mon->quorum_features | CEPH_FEATURE_RESERVED);
+  newmap.encode(pending_inc.fullmap,
+                mon->get_quorum_con_features() | CEPH_FEATURE_RESERVED);
   pending_inc.full_crc = newmap.get_crc();
   dout(20) << " full crc " << pending_inc.full_crc << dendl;
 }
@@ -236,7 +239,7 @@ void OSDMonitor::update_from_paxos(bool *need_bootstrap)
     // encode with all features.
     uint64_t f = inc.encode_features;
     if (!f)
-      f = mon->quorum_features;
+      f = mon->get_quorum_con_features();
     if (!f)
       f = -1;
     bufferlist full_bl;
@@ -1220,6 +1223,9 @@ void OSDMonitor::encode_pending(MonitorDBStore::TransactionRef t)
     }
   }
 
+  // features for osdmap and its incremental
+  uint64_t features = mon->get_quorum_con_features();
+
   // encode full map and determine its crc
   OSDMap tmp;
   {
@@ -1227,14 +1233,15 @@ void OSDMonitor::encode_pending(MonitorDBStore::TransactionRef t)
     tmp.apply_incremental(pending_inc);
 
     // determine appropriate features
-    uint64_t features = mon->quorum_features;
     if (!tmp.test_flag(CEPH_OSDMAP_REQUIRE_JEWEL)) {
       dout(10) << __func__ << " encoding without feature SERVER_JEWEL" << dendl;
       features &= ~CEPH_FEATURE_SERVER_JEWEL;
     }
     if (!tmp.test_flag(CEPH_OSDMAP_REQUIRE_KRAKEN)) {
-      dout(10) << __func__ << " encoding without feature SERVER_KRAKEN" << dendl;
-      features &= ~CEPH_FEATURE_SERVER_KRAKEN;
+      dout(10) << __func__ << " encoding without feature SERVER_KRAKEN | "
+	       << "MSG_ADDR2" << dendl;
+      features &= ~(CEPH_FEATURE_SERVER_KRAKEN |
+		    CEPH_FEATURE_MSG_ADDR2);
     }
     dout(10) << __func__ << " encoding full map with " << features << dendl;
 
@@ -1250,7 +1257,7 @@ void OSDMonitor::encode_pending(MonitorDBStore::TransactionRef t)
 
   // encode
   assert(get_last_committed() + 1 == pending_inc.epoch);
-  ::encode(pending_inc, bl, mon->quorum_features | CEPH_FEATURE_RESERVED);
+  ::encode(pending_inc, bl, features | CEPH_FEATURE_RESERVED);
 
   dout(20) << " full_crc " << tmp.get_crc()
 	   << " inc_crc " << pending_inc.inc_crc << dendl;
@@ -2053,6 +2060,15 @@ bool OSDMonitor::preprocess_boot(MonOpRequestRef op)
 	      << " doesn't announce support -- ignore" << dendl;
       goto ignore;
     }
+  }
+
+  // make sure upgrades stop at jewel
+  if ((m->osd_features & CEPH_FEATURE_SERVER_KRAKEN) &&
+      !osdmap.test_flag(CEPH_OSDMAP_REQUIRE_JEWEL)) {
+    mon->clog->info() << "disallowing boot of post-jewel OSD "
+		      << m->get_orig_source_inst()
+		      << " because require_jewel_osds is not set\n";
+    goto ignore;
   }
 
   // make sure upgrades stop at hammer
@@ -3043,8 +3059,7 @@ void OSDMonitor::get_health(list<pair<health_status_t,string> >& summary,
     }
 
     // Not using 'sortbitwise' and should be?
-    if (g_conf->mon_warn_on_no_sortbitwise &&
-	!osdmap.test_flag(CEPH_OSDMAP_SORTBITWISE) &&
+    if (!osdmap.test_flag(CEPH_OSDMAP_SORTBITWISE) &&
 	(osdmap.get_features(CEPH_ENTITY_TYPE_OSD, NULL) &
 	 CEPH_FEATURE_OSD_BITWISE_HOBJ_SORT)) {
       ostringstream ss;
@@ -3138,7 +3153,10 @@ namespace {
     MIN_WRITE_RECENCY_FOR_PROMOTE, FAST_READ,
     HIT_SET_GRADE_DECAY_RATE, HIT_SET_SEARCH_LAST_N,
     SCRUB_MIN_INTERVAL, SCRUB_MAX_INTERVAL, DEEP_SCRUB_INTERVAL,
-    RECOVERY_PRIORITY, RECOVERY_OP_PRIORITY, SCRUB_PRIORITY};
+    RECOVERY_PRIORITY, RECOVERY_OP_PRIORITY, SCRUB_PRIORITY,
+    COMPRESSION_MODE, COMPRESSION_ALGORITHM, COMPRESSION_REQUIRED_RATIO,
+    COMPRESSION_MAX_BLOB_SIZE, COMPRESSION_MIN_BLOB_SIZE,
+    CSUM_TYPE, CSUM_MAX_BLOCK, CSUM_MIN_BLOCK };
 
   std::set<osd_pool_get_choices>
     subtract_second_from_first(const std::set<osd_pool_get_choices>& first,
@@ -3637,6 +3655,14 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
       {"recovery_priority", RECOVERY_PRIORITY},
       {"recovery_op_priority", RECOVERY_OP_PRIORITY},
       {"scrub_priority", SCRUB_PRIORITY},
+      {"compression_mode", COMPRESSION_MODE},
+      {"compression_algorithm", COMPRESSION_ALGORITHM},
+      {"compression_required_ratio", COMPRESSION_REQUIRED_RATIO},
+      {"compression_max_blob_size", COMPRESSION_MAX_BLOB_SIZE},
+      {"compression_min_blob_size", COMPRESSION_MIN_BLOB_SIZE},
+      {"csum_type", CSUM_TYPE},
+      {"csum_max_block", CSUM_MAX_BLOCK},
+      {"csum_min_block", CSUM_MIN_BLOCK},
     };
 
     typedef std::set<osd_pool_get_choices> choices_set_t;
@@ -3825,12 +3851,27 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
           case RECOVERY_PRIORITY:
           case RECOVERY_OP_PRIORITY:
           case SCRUB_PRIORITY:
+	  case COMPRESSION_MODE:
+	  case COMPRESSION_ALGORITHM:
+	  case COMPRESSION_REQUIRED_RATIO:
+	  case COMPRESSION_MAX_BLOB_SIZE:
+	  case COMPRESSION_MIN_BLOB_SIZE:
+	  case CSUM_TYPE:
+	  case CSUM_MAX_BLOCK:
+	  case CSUM_MIN_BLOCK:
 	    for (i = ALL_CHOICES.begin(); i != ALL_CHOICES.end(); ++i) {
 	      if (i->second == *it)
 		break;
 	    }
 	    assert(i != ALL_CHOICES.end());
-	    p->opts.dump(i->first, f.get());
+            if(*it == CSUM_TYPE) {
+              int val;
+              p->opts.get(pool_opts_t::CSUM_TYPE, &val);
+              f->dump_string(i->first.c_str(), Checksummer::get_csum_type_string(val));
+            }
+	    else {
+              p->opts.dump(i->first, f.get());
+            }
             break;
 	}
 	f->close_section();
@@ -3959,6 +4000,14 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
           case RECOVERY_PRIORITY:
           case RECOVERY_OP_PRIORITY:
           case SCRUB_PRIORITY:
+	  case COMPRESSION_MODE:
+	  case COMPRESSION_ALGORITHM:
+	  case COMPRESSION_REQUIRED_RATIO:
+	  case COMPRESSION_MAX_BLOB_SIZE:
+	  case COMPRESSION_MIN_BLOB_SIZE:
+	  case CSUM_TYPE:
+	  case CSUM_MAX_BLOCK:
+	  case CSUM_MIN_BLOCK:
 	    for (i = ALL_CHOICES.begin(); i != ALL_CHOICES.end(); ++i) {
 	      if (i->second == *it)
 		break;
@@ -3967,7 +4016,13 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
 	    {
 	      pool_opts_t::key_t key = pool_opts_t::get_opt_desc(i->first).key;
 	      if (p->opts.is_set(key)) {
-		ss << i->first << ": " << p->opts.get(key) << "\n";
+                if(key == pool_opts_t::CSUM_TYPE) {
+                  int val;
+                  p->opts.get(key, &val);
+  		  ss << i->first << ": " << Checksummer::get_csum_type_string(val) << "\n";
+                } else {
+  		  ss << i->first << ": " << p->opts.get(key) << "\n";
+                }
 	      }
 	    }
 	    break;
@@ -4558,7 +4613,7 @@ int OSDMonitor::check_cluster_features(uint64_t features,
 {
   stringstream unsupported_ss;
   int unsupported_count = 0;
-  if ((mon->get_quorum_features() & features) != features) {
+  if ((mon->get_quorum_con_features() & features) != features) {
     unsupported_ss << "the monitor cluster";
     ++unsupported_count;
   }
@@ -5423,6 +5478,46 @@ int OSDMonitor::prepare_command_pool_set(map<string,cmd_vartype> &cmdmap,
       return -EINVAL;
     }
   } else if (pool_opts_t::is_opt_name(var)) {
+    if (var == "compression_mode") {
+      auto cmode = Compressor::get_comp_mode_type(val);
+      if (!cmode) {
+	ss << "unrecognized compression mode '" << val << "'";
+	return EINVAL;
+      }
+    } else if (var == "compression_algorithm") {
+      auto alg = Compressor::get_comp_alg_type(val);
+      if (!alg) {
+        ss << "unrecognized compression_algorithm '" << val << "'";
+	return EINVAL;
+      }
+    } else if (var == "compression_required_ratio") {
+      if (floaterr.length()) {
+        ss << "error parsing float value '" << val << "': " << floaterr;
+        return -EINVAL;
+      }
+      if (f < 0 || f>1) {
+        ss << "compression_required_ratio is out of range (0-1): '" << val << "'";
+	return EINVAL;
+      }
+    } else if (var == "csum_type") {
+      auto t = val != "unset" ? Checksummer::get_csum_string_type(val) : 0;
+      if (t < 0 ) {
+        ss << "unrecognized csum_type '" << val << "'";
+	return EINVAL;
+      }
+      //preserve csum_type numeric value
+      n = t;
+      interr.clear(); 
+    } else if (var == "compression_max_blob_size" ||
+               var == "compression_min_blob_size" ||
+               var == "csum_max_block" ||
+               var == "csum_min_block") {
+      if (interr.length()) {
+        ss << "error parsing int value '" << val << "': " << interr;
+        return -EINVAL;
+      }
+    }
+
     pool_opts_t::opt_desc_t desc = pool_opts_t::get_opt_desc(var);
     switch (desc.type) {
     case pool_opts_t::STR:
@@ -6437,14 +6532,20 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
 	err = -EPERM;
       }
     } else if (key == "require_jewel_osds") {
-      if (osdmap.get_up_osd_features() & CEPH_FEATURE_SERVER_JEWEL) {
+      if (!osdmap.test_flag(CEPH_OSDMAP_SORTBITWISE)) {
+	ss << "the sortbitwise flag must be set before require_jewel_osds";
+	err = -EPERM;
+      } else if (osdmap.get_up_osd_features() & CEPH_FEATURE_SERVER_JEWEL) {
 	return prepare_set_flag(op, CEPH_OSDMAP_REQUIRE_JEWEL);
       } else {
 	ss << "not all up OSDs have CEPH_FEATURE_SERVER_JEWEL feature";
 	err = -EPERM;
       }
     } else if (key == "require_kraken_osds") {
-      if (osdmap.get_up_osd_features() & CEPH_FEATURE_SERVER_KRAKEN) {
+      if (!osdmap.test_flag(CEPH_OSDMAP_SORTBITWISE)) {
+	ss << "the sortbitwise flag must be set before require_kraken_osds";
+	err = -EPERM;
+      } else if (osdmap.get_up_osd_features() & CEPH_FEATURE_SERVER_KRAKEN) {
 	bool r = prepare_set_flag(op, CEPH_OSDMAP_REQUIRE_KRAKEN);
 	// ensure JEWEL is also set
 	pending_inc.new_flags |= CEPH_OSDMAP_REQUIRE_JEWEL;

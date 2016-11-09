@@ -216,9 +216,6 @@ private:
   int _clone_range(const coll_t& cid, const ghobject_t& oldoid,
 		   const ghobject_t& newoid,
 		   uint64_t srcoff, uint64_t len, uint64_t dstoff);
-  int _move_ranges_destroy_src(const coll_t& cid, const ghobject_t& oldoid,
-		   const ghobject_t& newoid,
-		   const vector<boost::tuple<uint64_t, uint64_t, uint64_t> > move_info);
   int _omap_clear(const coll_t& cid, const ghobject_t &oid);
   int _omap_setkeys(const coll_t& cid, const ghobject_t &oid, bufferlist& aset_bl);
   int _omap_rmkeys(const coll_t& cid, const ghobject_t &oid, bufferlist& keys_bl);
@@ -290,6 +287,9 @@ public:
 	   struct stat *st, bool allow_eio = false) override;
   int stat(CollectionHandle &c, const ghobject_t& oid,
 	   struct stat *st, bool allow_eio = false) override;
+  int set_collection_opts(
+    const coll_t& cid,
+    const pool_opts_t& opts);
   int read(
     const coll_t& cid,
     const ghobject_t& oid,

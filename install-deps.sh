@@ -23,9 +23,10 @@ if [ x`uname`x = xFreeBSDx ]; then
     $SUDO pkg install -yq \
         devel/git \
         devel/gmake \
-        devel/automake \
+        devel/cmake \
         devel/yasm \
         devel/boost-all \
+        devel/boost-python-libs \
         devel/valgrind \
         devel/pkgconf \
         devel/libatomic_ops \
@@ -120,7 +121,7 @@ else
         $SUDO $builddepcmd $DIR/ceph.spec 2>&1 | tee $DIR/yum-builddep.out
         ! grep -q -i error: $DIR/yum-builddep.out || exit 1
         ;;
-    opensuse|suse)
+    opensuse|suse|sles)
         echo "Using zypper to install dependencies"
         $SUDO zypper --gpg-auto-import-keys --non-interactive install lsb-release systemd-rpm-macros
         sed -e 's/@//g' < ceph.spec.in > $DIR/ceph.spec

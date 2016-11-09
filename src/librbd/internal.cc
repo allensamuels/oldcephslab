@@ -810,6 +810,24 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
     return 0;
   }
 
+  int get_snap_namespace(ImageCtx *ictx,
+			 const char *snap_name,
+			 cls::rbd::SnapshotNamespace *snap_namespace) {
+    ldout(ictx->cct, 20) << "get_snap_namespace " << ictx << " " << snap_name
+			 << dendl;
+
+    int r = ictx->state->refresh_if_required();
+    if (r < 0)
+      return r;
+
+    RWLock::RLocker l(ictx->snap_lock);
+    snap_t snap_id = ictx->get_snap_id(snap_name);
+    if (snap_id == CEPH_NOSNAP)
+      return -ENOENT;
+    r = ictx->get_snap_namespace(snap_id, snap_namespace);
+    return r;
+  }
+
   int snap_is_protected(ImageCtx *ictx, const char *snap_name,
 			bool *is_protected)
   {
@@ -884,7 +902,7 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
   {
     CephContext *cct = (CephContext *)io_ctx.cct();
     bool old_format = cct->_conf->rbd_default_format == 1;
-    uint64_t features = old_format ? 0 : cct->_conf->rbd_default_features;
+    uint64_t features = old_format ? 0 : librbd::util::parse_rbd_default_features(cct);
     return create(io_ctx, imgname, size, old_format, features, order, 0, 0);
   }
 
@@ -1536,8 +1554,13 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
       }
 
       cls::rbd::GroupSpec s;
-      r = cls_client::image_get_group(&io_ctx, header_oid, s);
-      if (s.is_valid()) {
+      r = cls_client::image_get_group(&io_ctx, header_oid, &s);
+      if (r < 0 && r != -EOPNOTSUPP) {
+        lderr(cct) << "error querying consistency group" << dendl;
+        ictx->owner_lock.put_read();
+        ictx->state->close();
+        return r;
+      } else if (s.is_valid()) {
 	lderr(cct) << "image is in a consistency group - not removing" << dendl;
 	ictx->owner_lock.put_read();
 	ictx->state->close();
@@ -1699,6 +1722,15 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
 
     int r = 0;
 
+    cls::rbd::SnapshotNamespace snap_namespace;
+    r = get_snap_namespace(ictx, snap_name, &snap_namespace);
+    if (r < 0) {
+      return r;
+    }
+    if (boost::get<cls::rbd::UserSnapshotNamespace>(&snap_namespace) == nullptr) {
+      return -EINVAL;
+    }
+
     r = ictx->state->refresh_if_required();
     if (r < 0)
       return r;
@@ -1742,8 +1774,13 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
 
   int snap_get_limit(ImageCtx *ictx, uint64_t *limit)
   {
-    return cls_client::snapshot_get_limit(&ictx->md_ctx, ictx->header_oid,
-					  limit);
+    int r = cls_client::snapshot_get_limit(&ictx->md_ctx, ictx->header_oid,
+                                           limit);
+    if (r == -EOPNOTSUPP) {
+      *limit = UINT64_MAX;
+      r = 0;
+    }
+    return r;
   }
 
   int snap_set_limit(ImageCtx *ictx, uint64_t limit)

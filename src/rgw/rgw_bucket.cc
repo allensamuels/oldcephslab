@@ -224,6 +224,7 @@ int rgw_link_bucket(RGWRados *store, const rgw_user& user_id, rgw_bucket& bucket
 
   ep.linked = true;
   ep.owner = user_id;
+  ep.bucket = bucket;
   ret = store->put_bucket_entrypoint_info(tenant_name, bucket_name, ep, false, ot, real_time(), &attrs);
   if (ret < 0)
     goto done_err;
@@ -588,7 +589,7 @@ int rgw_remove_bucket(RGWRados *store, rgw_bucket& bucket, bool delete_children)
 static int aio_wait(librados::AioCompletion *handle)
 {
   librados::AioCompletion *c = (librados::AioCompletion *)handle;
-  c->wait_for_complete();
+  c->wait_for_safe();
   int ret = c->get_return_value();
   c->release();
   return ret;
@@ -891,7 +892,7 @@ int RGWBucket::link(RGWBucketAdminOpState& op_state, std::string *err_msg)
     rgw_obj obj_bucket_instance(bucket_instance, no_oid);
     r = store->system_obj_set_attr(NULL, obj_bucket_instance, RGW_ATTR_ACL, aclbl, &objv_tracker);
 
-    r = rgw_link_bucket(store, user_info.user_id, bucket, real_time());
+    r = rgw_link_bucket(store, user_info.user_id, bucket_info.bucket, real_time());
     if (r < 0)
       return r;
   }
@@ -975,11 +976,7 @@ static void dump_bucket_usage(map<RGWObjCategory, RGWStorageStats>& stats, Forma
     RGWStorageStats& s = iter->second;
     const char *cat_name = rgw_obj_category_name(iter->first);
     formatter->open_object_section(cat_name);
-    formatter->dump_int("size", s.size);
-    formatter->dump_int("size_actual", s.size_rounded);
-    formatter->dump_int("size_kb", rgw_rounded_kb(s.size));
-    formatter->dump_int("size_kb_actual", rgw_rounded_kb(s.size_rounded));
-    formatter->dump_int("num_objects", s.num_objects);
+    s.dump(formatter);
     formatter->close_section();
   }
   formatter->close_section();
@@ -2149,7 +2146,6 @@ public:
       bci.info.bucket.data_pool = old_bci.info.bucket.data_pool;
       bci.info.bucket.index_pool = old_bci.info.bucket.index_pool;
       bci.info.bucket.data_extra_pool = old_bci.info.bucket.data_extra_pool;
-      bci.info.index_type = old_bci.info.index_type;
     }
 
     // are we actually going to perform this put, or is it too old?

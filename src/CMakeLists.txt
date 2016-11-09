@@ -18,12 +18,15 @@ set(prefix ${CMAKE_INSTALL_PREFIX})
 add_definitions("-DCEPH_LIBDIR=\"${CMAKE_INSTALL_FULL_LIBDIR}\"")
 add_definitions("-DCEPH_PKGLIBDIR=\"${CMAKE_INSTALL_FULL_PKGLIBDIR}\"")
 add_definitions("-DHAVE_CONFIG_H -D__CEPH__ -D_REENTRANT -D_THREAD_SAFE -D__STDC_FORMAT_MACROS")
+if(LINUX)
+  add_definitions("-D_GNU_SOURCE -D_FILE_OFFSET_BITS=64")
+endif()
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wtype-limits -Wignored-qualifiers -Winit-self")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wpointer-arith -Werror=format-security -fno-strict-aliasing -fsigned-char")
 
+
 if(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
-  add_definitions("-D_GNU_SOURCE -D_FILE_OFFSET_BITS=64")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -rdynamic")
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pie")
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL Clang)
@@ -185,6 +188,8 @@ if(${ENABLE_GIT_VERSION})
     list(GET CEPH_GIT_SHA_AND_TAG 0 CEPH_GIT_VER)
     list(GET CEPH_GIT_SHA_AND_TAG 1 CEPH_GIT_NICE_VER)
   endif(${CEPH_GIT_VER} STREQUAL "GITDIR-NOTFOUND")
+  # remove 'v' prefix from raw git version
+  string(SUBSTRING ${CEPH_GIT_NICE_VER} 1 -1 CEPH_GIT_NICE_VER)
 else(${ENABLE_GIT_VERSION})
   set(CEPH_GIT_VER "no_version")
   set(CEPH_GIT_NICE_VER "Development")
@@ -222,6 +227,20 @@ if(HAVE_XIO)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${XIO_INCLUDE_DIR}")
   list(APPEND EXTRALIBS ${XIO_LIBRARY} pthread rt)
 endif(HAVE_XIO)
+
+if(HAVE_RDMA)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${RDMA_INCLUDE_DIR}")
+  list(APPEND EXTRALIBS ${RDMA_LIBRARIES} pthread rt)
+endif(HAVE_RDMA)
+
+if(HAVE_DPDK)
+  set(CMAKE_CXX_FLAGS "-march=native ${CMAKE_CXX_FLAGS} -I${DPDK_INCLUDE_DIR}")
+  list(APPEND EXTRALIBS ${DPDK_LIBRARY})
+  if(NOT USE_CRYPTOPP)
+    message(FATAL_ERROR "CRYPTOPP must be supported when enable DPDK.")
+  endif(NOT USE_CRYPTOPP)
+  list(APPEND EXTRALIBS ${DPDK_LIBRARIES})
+endif(HAVE_DPDK)
 
 # sort out which allocator to use
 if(ALLOCATOR STREQUAL "tcmalloc")
@@ -305,6 +324,33 @@ if(HAVE_XIO)
     msg/xio/XioPortal.cc
     msg/xio/QueueStrategy.cc)
 endif(HAVE_XIO)
+
+set(async_rdma_common_srcs)
+if(HAVE_RDMA)
+  list(APPEND async_rdma_common_srcs
+    msg/async/rdma/Infiniband.cc
+    msg/async/rdma/RDMAConnectedSocketImpl.cc
+    msg/async/rdma/RDMAServerSocketImpl.cc
+    msg/async/rdma/RDMAStack.cc)
+endif(HAVE_RDMA)
+
+set(dpdk_common_srcs)
+if(HAVE_DPDK)
+  list(APPEND dpdk_common_srcs
+    msg/async/dpdk/ARP.cc
+    msg/async/dpdk/DPDK.cc
+    msg/async/dpdk/dpdk_rte.cc
+    msg/async/dpdk/DPDKStack.cc
+    msg/async/dpdk/EventDPDK.cc
+    msg/async/dpdk/IP.cc
+    msg/async/dpdk/net.cc
+    msg/async/dpdk/IPChecksum.cc
+    msg/async/dpdk/Packet.cc
+    msg/async/dpdk/TCP.cc
+    msg/async/dpdk/UserspaceEvent.cc
+    msg/async/dpdk/ethernet.cc)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${DPDK_INCLUDE_DIR}")
+endif(HAVE_DPDK)
 
 if(HAVE_GOOD_YASM_ELF64)
   set(yasm_srcs
@@ -391,6 +437,8 @@ set(libcommon_files
   msg/async/PosixStack.cc
   msg/async/net_handler.cc
   ${xio_common_srcs}
+  ${async_rdma_common_srcs}
+  ${dpdk_common_srcs}
   msg/msg_types.cc
   common/hobject.cc
   osd/OSDMap.cc
@@ -433,6 +481,7 @@ set(libcommon_files
   common/TracepointProvider.cc
   common/Cycles.cc
   common/scrub_types.cc
+  common/bit_str.cc
   osdc/Striper.cc
   osdc/Objecter.cc
   common/Graylog.cc
@@ -541,7 +590,7 @@ endif (WITH_MGR)
 set(librados_config_srcs
   librados-config.cc)
 add_executable(librados-config ${librados_config_srcs})
-target_link_libraries(librados-config librados global ${BLKID_LIBRARIES}
+target_link_libraries(librados-config librados global ${BLKID_LIBRARIES} ${RDMA_LIBRARIES}
   ${CMAKE_DL_LIBS})
 
 install(TARGETS librados-config DESTINATION bin)
@@ -631,31 +680,45 @@ install(TARGETS ceph-mon DESTINATION bin)
 
 # OSD/ObjectStore
 # make rocksdb statically
-if(NOT ALLOCATOR STREQUAL "jemalloc")
-  set(disable_jemalloc "DISABLE_JEMALLOC=1")
+
+set(ROCKSDB_CMAKE_ARGS -DCMAKE_POSITION_INDEPENDENT_CODE=ON)
+
+if(ALLOCATOR STREQUAL "jemalloc")
+  list(APPEND ROCKSDB_CMAKE_ARGS -DWITH_JEMALLOC=ON)
 endif()
 
-set(ROCKSDB_EXTRA_CXXFLAG -fPIC -Wno-unused-variable)
-if(NOT CMAKE_BUILD_TYPE STREQUAL Debug)
-  set(ROCKSDB_EXTRA_CXXFLAG ${ROCKSDB_EXTRA_CXXFLAG} -DNDEBUG)
-endif(NOT CMAKE_BUILD_TYPE STREQUAL Debug)
-
-set(ROCKSDB_CXX "${CMAKE_CXX_COMPILER}")
 if (WITH_CCACHE AND CCACHE_FOUND)
-  set(ROCKSDB_CXX "ccache" "${CMAKE_CXX_COMPILER}")
+  list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_CXX_COMPILER=ccache)
+  list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_CXX_COMPILER_ARG1=${CMAKE_CXX_COMPILER})
+else(WITH_CCACHE AND CCACHE_FOUND)
+  list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER})
 endif(WITH_CCACHE AND CCACHE_FOUND)
 
-add_custom_target(build_rocksdb
-    COMMAND
-    PORTABLE=1 ${disable_jemalloc} $(MAKE) static_lib CXX="${ROCKSDB_CXX}" EXTRA_CXXFLAGS="${ROCKSDB_EXTRA_CXXFLAG}"
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/rocksdb
-    COMMENT "rocksdb building")
+list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_AR=${CMAKE_AR})
+list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE})
 
-# add a imported library for librocksdb.a
+# we use an external project and copy the sources to bin directory to ensure
+# that object files are built outside of the source tree.
+include(ExternalProject)
+ExternalProject_Add(rocksdb_ext
+  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rocksdb
+  CMAKE_ARGS ${ROCKSDB_CMAKE_ARGS}
+  BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/rocksdb
+  BUILD_COMMAND $(MAKE) rocksdblib
+  INSTALL_COMMAND "true")
+
+# force rocksdb make to be called on each time
+ExternalProject_Add_Step(rocksdb_ext forcebuild
+  DEPENDEES configure
+  DEPENDERS build
+  COMMAND "true"
+  ALWAYS 1)
+
+set(ROCKSDB_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rocksdb/include)
+
 add_library(rocksdb STATIC IMPORTED)
-set_property(TARGET rocksdb PROPERTY IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/src/rocksdb/librocksdb.a")
-add_dependencies(rocksdb build_rocksdb)
-set(ROCKSDB_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/src/rocksdb/include)
+add_dependencies(rocksdb rocksdb_ext)
+set_property(TARGET rocksdb PROPERTY IMPORTED_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/rocksdb/librocksdblib.a")
 
 add_subdirectory(kv)
 add_subdirectory(os)
@@ -669,7 +732,7 @@ set(ceph_osd_srcs
 add_executable(ceph-osd ${ceph_osd_srcs}
   $<TARGET_OBJECTS:common_util_obj>)
 add_dependencies(ceph-osd erasure_code_plugins)
-target_link_libraries(ceph-osd osd os global ${BLKID_LIBRARIES})
+target_link_libraries(ceph-osd osd os global ${BLKID_LIBRARIES} ${RDMA_LIBRARIES})
 if(WITH_FUSE)
   target_link_libraries(ceph-osd ${FUSE_LIBRARIES})
 endif()
@@ -772,8 +835,8 @@ if(WITH_LIBCEPHFS)
     endforeach()
     set_target_properties(cephfs PROPERTIES
       OUTPUT_NAME cephfs
-      VERSION 1.0.0
-      SOVERSION 1
+      VERSION 2.0.0
+      SOVERSION 2
       LINK_FLAGS ${CEPHFS_LINK_FLAGS})
   endif(ENABLE_SHARED)
   install(TARGETS cephfs DESTINATION ${CMAKE_INSTALL_LIBDIR})
@@ -838,6 +901,8 @@ if(WITH_RADOSGW)
   add_library(civetweb_common_objs OBJECT ${civetweb_common_files})
   target_include_directories(civetweb_common_objs PUBLIC
 	"${CMAKE_SOURCE_DIR}/src/civetweb/include")
+  set_property(TARGET civetweb_common_objs
+    APPEND PROPERTY COMPILE_DEFINITIONS USE_IPV6=1)
   if(HAVE_SSL)
     set_property(TARGET civetweb_common_objs
       APPEND PROPERTY COMPILE_DEFINITIONS NO_SSL_DL=1)

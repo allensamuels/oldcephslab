@@ -15,6 +15,7 @@
 
 #include <errno.h>
 
+#include "cls/rbd/cls_rbd_types.h"
 #include "common/dout.h"
 #include "common/errno.h"
 #include "common/TracepointProvider.h"
@@ -23,6 +24,7 @@
 #include "librbd/AioCompletion.h"
 #include "librbd/AioImageRequestWQ.h"
 #include "cls/rbd/cls_rbd_client.h"
+#include "cls/rbd/cls_rbd_types.h"
 #include "librbd/Group.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/ImageState.h"
@@ -481,7 +483,7 @@ namespace librbd {
     return r;
   }
 
-  int RBD::group_list(IoCtx& io_ctx, vector<string>& names)
+  int RBD::group_list(IoCtx& io_ctx, vector<string> *names)
   {
     TracepointProvider::initialize<tracepoint_traits>(get_cct(io_ctx));
     tracepoint(librbd, group_list_enter, io_ctx.get_pool_name().c_str(),
@@ -489,7 +491,7 @@ namespace librbd {
 
     int r = librbd::group_list(io_ctx, names);
     if (r >= 0) {
-      for (auto itr : names) {
+      for (auto itr : *names) {
 	tracepoint(librbd, group_list_entry, itr.c_str());
       }
     }
@@ -522,7 +524,7 @@ namespace librbd {
   }
 
   int RBD::group_image_list(IoCtx& group_ioctx, const char *group_name,
-                            std::vector<group_image_status_t>& images)
+                            std::vector<group_image_status_t> *images)
   {
     TracepointProvider::initialize<tracepoint_traits>(get_cct(group_ioctx));
     tracepoint(librbd, group_image_list_enter, group_ioctx.get_pool_name().c_str(),
@@ -1026,7 +1028,8 @@ namespace librbd {
   {
     ImageCtx *ictx = (ImageCtx *)ctx;
     tracepoint(librbd, snap_create_enter, ictx, ictx->name.c_str(), ictx->snap_name.c_str(), ictx->read_only, snap_name);
-    int r = ictx->operations->snap_create(snap_name);
+    int r = ictx->operations->snap_create(snap_name,
+					  cls::rbd::UserSnapshotNamespace());
     tracepoint(librbd, snap_create_exit, r);
     return r;
   }
@@ -2355,7 +2358,8 @@ extern "C" int rbd_snap_create(rbd_image_t image, const char *snap_name)
 {
   librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
   tracepoint(librbd, snap_create_enter, ictx, ictx->name.c_str(), ictx->snap_name.c_str(), ictx->read_only, snap_name);
-  int r = ictx->operations->snap_create(snap_name);
+  int r = ictx->operations->snap_create(snap_name,
+					cls::rbd::UserSnapshotNamespace());
   tracepoint(librbd, snap_create_exit, r);
   return r;
 }
@@ -3233,7 +3237,7 @@ extern "C" int rbd_group_image_list(rados_ioctx_t group_p,
 	     group_ioctx.get_id(), group_name);
 
   std::vector<librbd::group_image_status_t> cpp_images;
-  int r = librbd::group_image_list(group_ioctx, group_name, cpp_images);
+  int r = librbd::group_image_list(group_ioctx, group_name, &cpp_images);
 
   if (r == -ENOENT) {
     tracepoint(librbd, group_image_list_exit, 0);

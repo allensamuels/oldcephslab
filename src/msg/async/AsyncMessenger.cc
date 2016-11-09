@@ -79,6 +79,9 @@ int Processor::bind(const entity_addr_t &bind_addr, const set<int>& avoid_ports)
 
   // use whatever user specified (if anything)
   entity_addr_t listen_addr = bind_addr;
+  if (listen_addr.get_type() == entity_addr_t::TYPE_NONE) {
+    listen_addr.set_type(entity_addr_t::TYPE_LEGACY);
+  }
   listen_addr.set_family(family);
 
   /* bind to port */
@@ -191,11 +194,14 @@ void Processor::accept()
   while (true) {
     entity_addr_t addr;
     ConnectedSocket cli_socket;
-    int r = listen_socket.accept(&cli_socket, opts, &addr);
+    Worker *w = worker;
+    if (!msgr->get_stack()->support_local_listen_table())
+      w = msgr->get_stack()->get_worker();
+    int r = listen_socket.accept(&cli_socket, opts, &addr, w);
     if (r == 0) {
       ldout(msgr->cct, 10) << __func__ << " accepted incoming on sd " << cli_socket.fd() << dendl;
 
-      msgr->add_accept(worker, std::move(cli_socket), addr);
+      msgr->add_accept(w, std::move(cli_socket), addr);
       continue;
     } else {
       if (r == -EINTR) {
@@ -437,16 +443,13 @@ void AsyncMessenger::wait()
   started = false;
 }
 
-AsyncConnectionRef AsyncMessenger::add_accept(Worker *w, ConnectedSocket cli_socket, entity_addr_t &addr)
+void AsyncMessenger::add_accept(Worker *w, ConnectedSocket cli_socket, entity_addr_t &addr)
 {
   lock.Lock();
-  if (!stack->support_local_listen_table())
-    w = stack->get_worker();
   AsyncConnectionRef conn = new AsyncConnection(cct, this, &dispatch_queue, w);
   conn->accept(std::move(cli_socket), addr);
   accepting_conns.insert(conn);
   lock.Unlock();
-  return conn;
 }
 
 AsyncConnectionRef AsyncMessenger::create_connect(const entity_addr_t& addr, int type)
@@ -653,7 +656,8 @@ void AsyncMessenger::learned_addr(const entity_addr_t &peer_addr_for_me)
     need_addr = false;
     entity_addr_t t = peer_addr_for_me;
     t.set_port(my_inst.addr.get_port());
-    my_inst.addr.u = t.u;
+    t.set_nonce(my_inst.addr.get_nonce());
+    my_inst.addr = t;
     ldout(cct, 1) << __func__ << " learned my addr " << my_inst.addr << dendl;
     _init_local_connection();
   }

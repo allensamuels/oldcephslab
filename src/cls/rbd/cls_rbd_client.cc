@@ -74,7 +74,6 @@ namespace librbd {
       ::encode(snap, parent_bl);
       op->exec("rbd", "get_parent", parent_bl);
 
-      op->exec("rbd", "image_get_group", empty_bl);
       rados::cls::lock::get_lock_info_start(op, RBD_LOCK_NAME);
     }
 
@@ -84,8 +83,7 @@ namespace librbd {
                                     std::map<rados::cls::lock::locker_id_t,
                                              rados::cls::lock::locker_info_t> *lockers,
                                     bool *exclusive_lock, std::string *lock_tag,
-				    ::SnapContext *snapc, parent_info *parent,
-				    cls::rbd::GroupSpec *group_ref) {
+				    ::SnapContext *snapc, parent_info *parent) {
       assert(size);
       assert(features);
       assert(incompatible_features);
@@ -93,7 +91,6 @@ namespace librbd {
       assert(exclusive_lock);
       assert(snapc);
       assert(parent);
-      assert(group_ref);
 
       try {
 	uint8_t order;
@@ -110,8 +107,6 @@ namespace librbd {
 	::decode(parent->spec.image_id, *it);
 	::decode(parent->spec.snap_id, *it);
 	::decode(parent->overlap, *it);
-	// group_image_get_group
-	::decode(*group_ref, *it);
 
 	// get_lock_info
 	ClsLockType lock_type = LOCK_NONE;
@@ -137,8 +132,7 @@ namespace librbd {
                              bool *exclusive_lock,
 			     string *lock_tag,
 			     ::SnapContext *snapc,
-			     parent_info *parent,
-			     cls::rbd::GroupSpec *group_ref)
+			     parent_info *parent)
     {
       librados::ObjectReadOperation op;
       get_mutable_metadata_start(&op, read_only);
@@ -153,7 +147,7 @@ namespace librbd {
       return get_mutable_metadata_finish(&it, size, features,
                                          incompatible_features, lockers,
                                          exclusive_lock, lock_tag, snapc,
-                                         parent, group_ref);
+                                         parent);
     }
 
     void create_image(librados::ObjectWriteOperation *op, uint64_t size,
@@ -481,11 +475,12 @@ namespace librbd {
     }
 
     void snapshot_add(librados::ObjectWriteOperation *op, snapid_t snap_id,
-		      const std::string &snap_name)
+		      const std::string &snap_name, const cls::rbd::SnapshotNamespace &snap_namespace)
     {
       bufferlist bl;
       ::encode(snap_name, bl);
       ::encode(snap_id, bl);
+      ::encode(cls::rbd::SnapshotNamespaceOnDisk(snap_namespace), bl);
       op->exec("rbd", "snapshot_add", bl);
     }
 
@@ -550,7 +545,8 @@ namespace librbd {
                              std::vector<string> *names,
                              std::vector<uint64_t> *sizes,
                              std::vector<parent_info> *parents,
-                             std::vector<uint8_t> *protection_statuses) {
+                             std::vector<uint8_t> *protection_statuses)
+    {
       names->resize(ids.size());
       sizes->resize(ids.size());
       parents->resize(ids.size());
@@ -596,6 +592,52 @@ namespace librbd {
       bufferlist::iterator it = out_bl.begin();
       return snapshot_list_finish(&it, ids, names, sizes, parents,
                                   protection_statuses);
+    }
+
+    void snap_namespace_list_start(librados::ObjectReadOperation *op,
+                             const std::vector<snapid_t> &ids)
+    {
+      for (vector<snapid_t>::const_iterator it = ids.begin();
+           it != ids.end(); ++it) {
+        snapid_t snap_id = it->val;
+        bufferlist bl;
+        ::encode(snap_id, bl);
+	op->exec("rbd", "get_snapshot_namespace", bl);
+      }
+    }
+
+    int snap_namespace_list_finish(bufferlist::iterator *it,
+				   const std::vector<snapid_t> &ids,
+				   std::vector<cls::rbd::SnapshotNamespace> *namespaces)
+    {
+      namespaces->resize(ids.size());
+      try {
+	for (size_t i = 0; i < namespaces->size(); ++i) {
+	  cls::rbd::SnapshotNamespaceOnDisk e;
+	  ::decode(e, *it);
+	  (*namespaces)[i] = e.snapshot_namespace;
+	}
+      } catch (const buffer::error &err) {
+        return -EBADMSG;
+      }
+      return 0;
+    }
+
+    int snap_namespace_list(librados::IoCtx *ioctx, const std::string &oid,
+			    const std::vector<snapid_t> &ids,
+			    std::vector<cls::rbd::SnapshotNamespace> *namespaces)
+    {
+      librados::ObjectReadOperation op;
+      snap_namespace_list_start(&op, ids);
+
+      bufferlist out_bl;
+      int r = ioctx->operate(oid, &op, &out_bl);
+      if (r < 0) {
+        return r;
+      }
+
+      bufferlist::iterator it = out_bl.begin();
+      return snap_namespace_list_finish(&it, ids, namespaces);
     }
 
     void old_snapshot_add(librados::ObjectWriteOperation *op,
@@ -1654,9 +1696,10 @@ namespace librbd {
     }
 
     int group_image_list(librados::IoCtx *ioctx,
-			 const std::string &oid, const cls::rbd::GroupImageSpec &start,
+			 const std::string &oid,
+                         const cls::rbd::GroupImageSpec &start,
 			 uint64_t max_return,
-			 std::vector<cls::rbd::GroupImageStatus>& images)
+			 std::vector<cls::rbd::GroupImageStatus> *images)
     {
       bufferlist bl, bl2;
       ::encode(start, bl);
@@ -1668,7 +1711,7 @@ namespace librbd {
 
       bufferlist::iterator iter = bl2.begin();
       try {
-	::decode(images, iter);
+	::decode(*images, iter);
       } catch (const buffer::error &err) {
 	return -EBADMSG;
       }
@@ -1703,23 +1746,37 @@ namespace librbd {
       return ioctx->exec(oid, "rbd", "image_remove_group", bl, bl2);
     }
 
-    int image_get_group(librados::IoCtx *ioctx, const std::string &oid,
-			cls::rbd::GroupSpec &group_spec)
+    void image_get_group_start(librados::ObjectReadOperation *op)
     {
-      bufferlist in, out;
+      bufferlist in_bl;
+      op->exec("rbd", "image_get_group", in_bl);
+    }
 
-      int r = ioctx->exec(oid, "rbd", "image_get_group", in, out);
-      if (r < 0)
-	return r;
-
-      bufferlist::iterator iter = out.begin();
+    int image_get_group_finish(bufferlist::iterator *iter,
+                               cls::rbd::GroupSpec *group_spec)
+    {
       try {
-	::decode(group_spec, iter);
+	::decode(*group_spec, *iter);
       } catch (const buffer::error &err) {
 	return -EBADMSG;
       }
-
       return 0;
+    }
+
+    int image_get_group(librados::IoCtx *ioctx, const std::string &oid,
+			cls::rbd::GroupSpec *group_spec)
+    {
+      librados::ObjectReadOperation op;
+      image_get_group_start(&op);
+
+      bufferlist out_bl;
+      int r = ioctx->operate(oid, &op, &out_bl);
+      if (r < 0) {
+        return r;
+      }
+
+      bufferlist::iterator iter = out_bl.begin();
+      return image_get_group_finish(&iter, group_spec);
     }
 
   } // namespace cls_client

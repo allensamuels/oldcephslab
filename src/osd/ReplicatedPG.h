@@ -257,7 +257,7 @@ public:
   void on_global_recover(
     const hobject_t &oid,
     const object_stat_sum_t &stat_diff) override;
-  void failed_push(pg_shard_t from, const hobject_t &soid) override;
+  void failed_push(const list<pg_shard_t> &from, const hobject_t &soid) override;
   void cancel_pull(const hobject_t &soid) override;
 
   template<class T> class BlessedGenContext;
@@ -687,9 +687,11 @@ public:
 
     RepGather(
       ObcLockManager &&manager,
+      OpRequestRef &&o,
       boost::optional<std::function<void(void)> > &&on_complete,
       ceph_tid_t rt,
       eversion_t lc) :
+      op(o),
       queue_item(this),
       nref(1),
       rep_tid(rt),
@@ -833,6 +835,7 @@ protected:
     ceph_tid_t rep_tid);
   boost::intrusive_ptr<RepGather> new_repop(
     ObcLockManager &&manager,
+    OpRequestRef &&op,
     boost::optional<std::function<void(void)> > &&on_complete);
   void remove_repop(RepGather *repop);
 
@@ -848,7 +851,8 @@ protected:
   void submit_log_entries(
     const list<pg_log_entry_t> &entries,
     ObcLockManager &&manager,
-    boost::optional<std::function<void(void)> > &&on_complete);
+    boost::optional<std::function<void(void)> > &&on_complete,
+    OpRequestRef op = OpRequestRef());
   struct LogUpdateCtx {
     boost::intrusive_ptr<RepGather> repop;
     set<pg_shard_t> waiting_on;
@@ -1306,7 +1310,7 @@ protected:
   // -- scrub --
   virtual bool _range_available_for_scrub(
     const hobject_t &begin, const hobject_t &end) override;
-  virtual void _scrub(
+  virtual void scrub_snapshot_metadata(
     ScrubMap &map,
     const std::map<hobject_t, pair<uint32_t, uint32_t>,
     hobject_t::BitwiseComparator> &missing_digest) override;

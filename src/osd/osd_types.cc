@@ -961,7 +961,23 @@ static opt_mapping_t opt_mapping = boost::assign::map_list_of
            ("recovery_op_priority", pool_opts_t::opt_desc_t(
              pool_opts_t::RECOVERY_OP_PRIORITY, pool_opts_t::INT))
            ("scrub_priority", pool_opts_t::opt_desc_t(
-             pool_opts_t::SCRUB_PRIORITY, pool_opts_t::INT));
+             pool_opts_t::SCRUB_PRIORITY, pool_opts_t::INT))
+           ("compression_mode", pool_opts_t::opt_desc_t(
+	     pool_opts_t::COMPRESSION_MODE, pool_opts_t::STR))
+           ("compression_algorithm", pool_opts_t::opt_desc_t(
+	     pool_opts_t::COMPRESSION_ALGORITHM, pool_opts_t::STR))
+           ("compression_required_ratio", pool_opts_t::opt_desc_t(
+	     pool_opts_t::COMPRESSION_REQUIRED_RATIO, pool_opts_t::DOUBLE))
+           ("compression_max_blob_size", pool_opts_t::opt_desc_t(
+	     pool_opts_t::COMPRESSION_MAX_BLOB_SIZE, pool_opts_t::INT))
+           ("compression_min_blob_size", pool_opts_t::opt_desc_t(
+	     pool_opts_t::COMPRESSION_MIN_BLOB_SIZE, pool_opts_t::INT))
+           ("csum_type", pool_opts_t::opt_desc_t(
+	     pool_opts_t::CSUM_TYPE, pool_opts_t::INT))
+           ("csum_max_block", pool_opts_t::opt_desc_t(
+	     pool_opts_t::CSUM_MAX_BLOCK, pool_opts_t::INT))
+           ("csum_min_block", pool_opts_t::opt_desc_t(
+	     pool_opts_t::CSUM_MIN_BLOCK, pool_opts_t::INT));
 
 bool pool_opts_t::is_opt_name(const std::string& name) {
     return opt_mapping.find(name) != opt_mapping.end();
@@ -4425,6 +4441,7 @@ void watch_info_t::generate_test_instances(list<watch_info_t*>& o)
   o.back()->cookie = 123;
   o.back()->timeout_seconds = 99;
   entity_addr_t ea;
+  ea.set_type(entity_addr_t::TYPE_LEGACY);
   ea.set_nonce(1);
   ea.set_family(AF_INET);
   ea.set_in4_quad(0, 127);

@@ -64,6 +64,7 @@ static void usage()
             << "  --device <device path>                    Specify nbd device path\n"
             << "  --read-only                               Map readonly\n"
             << "  --nbds_max <limit>                        Override for module param\n"
+            << "  --exclusive                               Forbid other clients write\n"
             << std::endl;
   generic_server_usage();
 }
@@ -71,6 +72,7 @@ static void usage()
 static std::string devpath, poolname("rbd"), imgname, snapname;
 static bool readonly = false;
 static int nbds_max = 0;
+static bool exclusive = false;
 
 #ifdef CEPH_BIG_ENDIAN
 #define ntohll(a) (a)
@@ -566,6 +568,15 @@ static int do_map()
   if (r < 0)
     goto close_nbd;
 
+  if (exclusive) {
+    r = image.lock_acquire(RBD_LOCK_MODE_EXCLUSIVE);
+    if (r < 0) {
+      cerr << "rbd-nbd: failed to acquire exclusive lock: " << cpp_strerror(r)
+           << std::endl;
+      goto close_nbd;
+    }
+  }
+
   if (!snapname.empty()) {
     r = image.snap_set(snapname.c_str());
     if (r < 0)
@@ -583,6 +594,14 @@ static int do_map()
   }
 
   size = info.size;
+
+  if (size > (1UL << 32) * 512) {
+    r = -EFBIG;
+    cerr << "rbd-nbd: image is too large (" << prettybyte_t(size) << ", max is "
+         << prettybyte_t((1UL << 32) * 512) << ")" << std::endl;
+    goto close_nbd;
+  }
+
   r = ioctl(nbd, NBD_SET_SIZE, size);
   if (r < 0) {
     r = -errno;
@@ -758,6 +777,8 @@ static int rbd_nbd(int argc, const char *argv[])
       }
     } else if (ceph_argparse_flag(args, i, "--read-only", (char *)NULL)) {
       readonly = true;
+    } else if (ceph_argparse_flag(args, i, "--exclusive", (char *)NULL)) {
+      exclusive = true;
     } else {
       ++i;
     }

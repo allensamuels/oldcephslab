@@ -11,11 +11,11 @@ named ``Module`` that inherits from ``MgrModule``.
 The most important methods to override are:
 
 * a ``serve`` member function for server-type modules.  This
-function should block forever.
+  function should block forever.
 * a ``notify`` member function if your module needs to
-take action when new cluster data is available.
+  take action when new cluster data is available.
 * a ``handle_command`` member function if your module
-exposes CLI commands.
+  exposes CLI commands.
 
 Installing a plugin
 -------------------
@@ -48,9 +48,8 @@ Exposing commands
 -----------------
 
 Set the ``COMMANDS`` class attribute of your plugin to a list of dicts
-like this:
+like this::
 
-::
     COMMANDS = [
         {
             "cmd": "foobar name=myarg,type=CephString",
@@ -73,6 +72,7 @@ storing large amounts of data.
 Config values are stored using the mon's config-key commands.
 
 Hints for using these:
+
 * Reads are fast: ceph-mgr keeps a local in-memory copy
 * Don't set things by hand with "ceph config-key", the mgr doesn't update
   at runtime (only set things from within modules).

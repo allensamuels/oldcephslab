@@ -123,7 +123,8 @@ dump_cmddesc_to_json(Formatter *jf,
 		     const string& helptext,
 		     const string& module,
 		     const string& perm,
-		     const string& avail)
+		     const string& avail,
+		     uint64_t flags)
 {
       jf->open_object_section(secname.c_str());
       jf->open_array_section("sig");
@@ -133,9 +134,9 @@ dump_cmddesc_to_json(Formatter *jf,
       jf->dump_string("module", module.c_str());
       jf->dump_string("perm", perm.c_str());
       jf->dump_string("avail", avail.c_str());
+      jf->dump_int("flags", flags);
       jf->close_section(); // cmd
 }
-
 
 void cmdmap_dump(const cmdmap_t &cmdmap, Formatter *f)
 {
@@ -249,7 +250,7 @@ cmdmap_from_json(vector<string> cmd, map<string, cmd_vartype> *mapp, stringstrea
 	    // if an empty array is acceptable, the caller should always check for
 	    // vector<string> if the expected value of "vector<int64_t>" in the
 	    // cmdmap is missing.
-	    (*mapp)[it->first] = std::move(vector<string>());
+	    (*mapp)[it->first] = vector<string>();
 	  } else if (spvals.front().type() == json_spirit::str_type) {
 	    vector<string> outv;
 	    for (const auto& sv : spvals) {

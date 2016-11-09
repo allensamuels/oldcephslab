@@ -106,6 +106,8 @@ OPTION(async_compressor_threads, OPT_INT, 2)
 OPTION(async_compressor_thread_timeout, OPT_INT, 5)
 OPTION(async_compressor_thread_suicide_timeout, OPT_INT, 30)
 
+OPTION(mempool_debug, OPT_BOOL, false)
+
 DEFAULT_SUBSYS(0, 5)
 SUBSYS(lockdep, 0, 1)
 SUBSYS(context, 0, 1)
@@ -163,6 +165,7 @@ SUBSYS(kinetic, 1, 5)
 SUBSYS(fuse, 1, 5)
 SUBSYS(mgr, 1, 5)
 SUBSYS(mgrc, 1, 5)
+SUBSYS(dpdk, 1, 5)
 
 OPTION(key, OPT_STR, "")
 OPTION(keyfile, OPT_STR, "")
@@ -213,6 +216,27 @@ OPTION(ms_async_set_affinity, OPT_BOOL, true)
 // core
 OPTION(ms_async_affinity_cores, OPT_STR, "")
 OPTION(ms_async_send_inline, OPT_BOOL, false)
+OPTION(ms_async_rdma_device_name, OPT_STR, "")
+OPTION(ms_async_rdma_enable_hugepage, OPT_BOOL, false)
+OPTION(ms_async_rdma_buffer_size, OPT_INT, 8192)
+OPTION(ms_async_rdma_send_buffers, OPT_U32, 10240)
+OPTION(ms_async_rdma_receive_buffers, OPT_U32, 10240)
+OPTION(ms_async_rdma_port_num, OPT_U32, 1)
+
+OPTION(ms_dpdk_port_id, OPT_INT, 0)
+OPTION(ms_dpdk_coremask, OPT_STR, "1")
+OPTION(ms_dpdk_memory_channel, OPT_STR, "4")
+OPTION(ms_dpdk_hugepages, OPT_STR, "")
+OPTION(ms_dpdk_pmd, OPT_STR, "")
+OPTION(ms_dpdk_host_ipv4_addr, OPT_STR, "")
+OPTION(ms_dpdk_gateway_ipv4_addr, OPT_STR, "")
+OPTION(ms_dpdk_netmask_ipv4_addr, OPT_STR, "")
+OPTION(ms_dpdk_lro, OPT_BOOL, true)
+OPTION(ms_dpdk_hw_flow_control, OPT_BOOL, true)
+// Weighing of a hardware network queue relative to a software queue (0=no work, 1=     equal share)")
+OPTION(ms_dpdk_hw_queue_weight, OPT_FLOAT, 1)
+OPTION(ms_dpdk_debug_allow_loopback, OPT_BOOL, false)
+OPTION(ms_dpdk_rx_buffer_count_per_core, OPT_INT, 8192)
 
 OPTION(inject_early_sigterm, OPT_BOOL, false)
 
@@ -280,7 +304,6 @@ OPTION(mon_crush_min_required_version, OPT_STR, "firefly")
 OPTION(mon_warn_on_crush_straw_calc_version_zero, OPT_BOOL, true) // warn if crush straw_calc_version==0
 OPTION(mon_warn_on_osd_down_out_interval_zero, OPT_BOOL, true) // warn if 'mon_osd_down_out_interval == 0'
 OPTION(mon_warn_on_cache_pools_without_hit_sets, OPT_BOOL, true)
-OPTION(mon_warn_on_no_sortbitwise, OPT_BOOL, true)  // warn when sortbitwise not set
 OPTION(mon_min_osdmap_epochs, OPT_INT, 500)
 OPTION(mon_max_pgmap_epochs, OPT_INT, 500)
 OPTION(mon_max_log_epochs, OPT_INT, 500)
@@ -337,7 +360,7 @@ OPTION(mon_inject_transaction_delay_probability, OPT_DOUBLE, 0) // range [0, 1]
 OPTION(mon_sync_provider_kill_at, OPT_INT, 0)  // kill the sync provider at a specific point in the work flow
 OPTION(mon_sync_requester_kill_at, OPT_INT, 0) // kill the sync requester at a specific point in the work flow
 OPTION(mon_force_quorum_join, OPT_BOOL, false) // force monitor to join quorum even if it has been previously removed from the map
-OPTION(mon_keyvaluedb, OPT_STR, "leveldb")   // type of keyvaluedb backend
+OPTION(mon_keyvaluedb, OPT_STR, "rocksdb")   // type of keyvaluedb backend
 
 // UNSAFE -- TESTING ONLY! Allows addition of a cache tier with preexisting snaps
 OPTION(mon_debug_unsafe_allow_tier_with_nonempty_snaps, OPT_BOOL, false)
@@ -610,6 +633,7 @@ OPTION(osd_uuid, OPT_UUID, uuid_d())
 OPTION(osd_data, OPT_STR, "/var/lib/ceph/osd/$cluster-$id")
 OPTION(osd_journal, OPT_STR, "/var/lib/ceph/osd/$cluster-$id/journal")
 OPTION(osd_journal_size, OPT_INT, 5120)         // in mb
+OPTION(osd_journal_flush_on_shutdown, OPT_BOOL, true) // Flush journal to data store on shutdown
 // flags for specific control purpose during osd mount() process. 
 // e.g., can be 1 to skip over replaying journal
 // or 2 to skip over mounting omap or 3 to skip over both.
@@ -826,6 +850,8 @@ OPTION(osd_fast_fail_on_connection_refused, OPT_BOOL, true) // immediately mark 
 OPTION(osd_pg_object_context_cache_count, OPT_INT, 64)
 OPTION(osd_tracing, OPT_BOOL, false) // true if LTTng-UST tracepoints should be enabled
 
+OPTION(osd_fast_info, OPT_BOOL, true) // use fast info attr, if we can
+
 // determines whether PGLog::check() compares written out log to stored log
 OPTION(osd_debug_pg_log_writeout, OPT_BOOL, false)
 OPTION(osd_loop_before_reset_tphandle, OPT_U32, 64) // Max number of loop before we reset thread-pool's handle
@@ -858,6 +884,8 @@ OPTION(rocksdb_log_to_ceph_log, OPT_BOOL, true)  // log to ceph log
 OPTION(rocksdb_cache_size, OPT_INT, 128*1024*1024)  // default rocksdb cache size
 OPTION(rocksdb_cache_shard_bits, OPT_INT, 4)  // rocksdb block cache shard bits, 4 bit -> 16 shards
 OPTION(rocksdb_block_size, OPT_INT, 4*1024)  // default rocksdb block size
+OPTION(rocksdb_perf, OPT_BOOL, false) // rocksdb breakdown
+
 // rocksdb options that will be used for omap(if omap_backend is rocksdb)
 OPTION(filestore_rocksdb_options, OPT_STR, "")
 // rocksdb options that will be used in monstore
@@ -925,12 +953,16 @@ OPTION(bdev_aio, OPT_BOOL, true)
 OPTION(bdev_aio_poll_ms, OPT_INT, 250)  // milliseconds
 OPTION(bdev_aio_max_queue_depth, OPT_INT, 32)
 OPTION(bdev_block_size, OPT_INT, 4096)
+OPTION(bdev_debug_aio, OPT_BOOL, false)
+OPTION(bdev_debug_aio_suicide_timeout, OPT_FLOAT, 60.0)
 
 // if yes, osd will unbind all NVMe devices from kernel driver and bind them
 // to the uio_pci_generic driver. The purpose is to prevent the case where
 // NVMe driver is loaded while osd is running.
 OPTION(bdev_nvme_unbind_from_kernel, OPT_BOOL, false)
 OPTION(bdev_nvme_retry_count, OPT_INT, -1) // -1 means by default which is 4
+
+OPTION(objectstore_blackhole, OPT_BOOL, false)
 
 OPTION(bluefs_alloc_size, OPT_U64, 1048576)
 OPTION(bluefs_max_prefetch, OPT_U64, 1048576)
@@ -969,13 +1001,13 @@ OPTION(bluestore_block_preallocate_file, OPT_BOOL, false) //whether preallocate 
 OPTION(bluestore_precondition_bluefs, OPT_U64, 128*1024*1024)  // write this much data at mkfs
 OPTION(bluestore_precondition_bluefs_block, OPT_U64, 1048576)
 OPTION(bluestore_csum_type, OPT_STR, "crc32c") // none|xxhash32|xxhash64|crc32c|crc32c_16|crc32c_8
-OPTION(bluestore_min_csum_block, OPT_U32, 4096)
-OPTION(bluestore_max_csum_block, OPT_U32, 64*1024)
+OPTION(bluestore_csum_min_block, OPT_U32, 4096)
+OPTION(bluestore_csum_max_block, OPT_U32, 64*1024)
 OPTION(bluestore_min_alloc_size, OPT_U32, 0)
 OPTION(bluestore_min_alloc_size_hdd, OPT_U32, 64*1024)
 OPTION(bluestore_min_alloc_size_ssd, OPT_U32, 4*1024)
 OPTION(bluestore_max_alloc_size, OPT_U32, 0)
-OPTION(bluestore_compression, OPT_STR, "none")  // force|aggressive|passive|none
+OPTION(bluestore_compression_mode, OPT_STR, "none")  // force|aggressive|passive|none
 OPTION(bluestore_compression_algorithm, OPT_STR, "snappy")
 OPTION(bluestore_compression_min_blob_size, OPT_U32, 128*1024)
 OPTION(bluestore_compression_max_blob_size, OPT_U32, 512*1024)
@@ -993,21 +1025,26 @@ OPTION(bluestore_extent_map_shard_target_size, OPT_U32, 500)
 OPTION(bluestore_extent_map_shard_min_size, OPT_U32, 150)
 OPTION(bluestore_extent_map_shard_target_size_slop, OPT_DOUBLE, .2)
 OPTION(bluestore_extent_map_inline_shard_prealloc_size, OPT_U32, 256)
+OPTION(bluestore_cache_trim_interval, OPT_DOUBLE, .1)
 OPTION(bluestore_cache_type, OPT_STR, "2q")   // lru, 2q
-OPTION(bluestore_onode_cache_size, OPT_U32, 4*1024)
-OPTION(bluestore_buffer_cache_size, OPT_U32, 512*1024*1024)
+OPTION(bluestore_2q_cache_kin_ratio, OPT_DOUBLE, .5)    // kin page slot size / max page slot size
+OPTION(bluestore_2q_cache_kout_ratio, OPT_DOUBLE, .5)   // number of kout page slot / total number of page slot
+OPTION(bluestore_cache_size, OPT_U64, 1024*1024*1024)
+OPTION(bluestore_cache_meta_ratio, OPT_DOUBLE, .1)
 OPTION(bluestore_kvbackend, OPT_STR, "rocksdb")
 OPTION(bluestore_allocator, OPT_STR, "bitmap")     // stupid | bitmap
 OPTION(bluestore_freelist_type, OPT_STR, "bitmap") // extent | bitmap
 OPTION(bluestore_freelist_blocks_per_key, OPT_INT, 128)
 OPTION(bluestore_bitmapallocator_blocks_per_zone, OPT_INT, 1024) // must be power of 2 aligned, e.g., 512, 1024, 2048...
 OPTION(bluestore_bitmapallocator_span_size, OPT_INT, 1024) // must be power of 2 aligned, e.g., 512, 1024, 2048...
-OPTION(bluestore_rocksdb_options, OPT_STR, "compression=kNoCompression,max_write_buffer_number=16,min_write_buffer_number_to_merge=3,recycle_log_file_num=16")
+OPTION(bluestore_rocksdb_options, OPT_STR, "compression=kNoCompression,max_write_buffer_number=4,min_write_buffer_number_to_merge=1,recycle_log_file_num=4,write_buffer_size=268435456")
 OPTION(bluestore_fsck_on_mount, OPT_BOOL, false)
+OPTION(bluestore_fsck_on_mount_deep, OPT_BOOL, true)
 OPTION(bluestore_fsck_on_umount, OPT_BOOL, false)
+OPTION(bluestore_fsck_on_umount_deep, OPT_BOOL, true)
 OPTION(bluestore_fsck_on_mkfs, OPT_BOOL, true)
-OPTION(bluestore_sync_transaction, OPT_BOOL, false)  // perform kv txn synchronously
-OPTION(bluestore_sync_submit_transaction, OPT_BOOL, false)
+OPTION(bluestore_fsck_on_mkfs_deep, OPT_BOOL, false)
+OPTION(bluestore_sync_submit_transaction, OPT_BOOL, true) // submit kv txn in queueing thread (not kv_sync_thread)
 OPTION(bluestore_sync_wal_apply, OPT_BOOL, true)     // perform initial wal work synchronously (possibly in combination with aio so we only *queue* ios)
 OPTION(bluestore_wal_threads, OPT_INT, 4)
 OPTION(bluestore_wal_thread_timeout, OPT_INT, 30)
@@ -1018,9 +1055,7 @@ OPTION(bluestore_wal_max_ops, OPT_U64, 512)
 OPTION(bluestore_wal_max_bytes, OPT_U64, 128*1024*1024)
 OPTION(bluestore_nid_prealloc, OPT_INT, 1024)
 OPTION(bluestore_blobid_prealloc, OPT_U64, 10240)
-OPTION(bluestore_overlay_max_length, OPT_INT, 65536)
-OPTION(bluestore_overlay_max, OPT_INT, 0)
-OPTION(bluestore_clone_cow, OPT_BOOL, false)  // do copy-on-write for clones
+OPTION(bluestore_clone_cow, OPT_BOOL, true)  // do copy-on-write for clones
 OPTION(bluestore_default_buffered_read, OPT_BOOL, true)
 OPTION(bluestore_default_buffered_write, OPT_BOOL, false)
 OPTION(bluestore_debug_misc, OPT_BOOL, false)
@@ -1030,6 +1065,7 @@ OPTION(bluestore_debug_freelist, OPT_BOOL, false)
 OPTION(bluestore_debug_prefill, OPT_FLOAT, 0)
 OPTION(bluestore_debug_prefragment_max, OPT_INT, 1048576)
 OPTION(bluestore_debug_inject_read_err, OPT_BOOL, false)
+OPTION(bluestore_debug_randomize_serial_transaction, OPT_INT, 0)
 OPTION(bluestore_inject_wal_apply_delay, OPT_FLOAT, 0)
 OPTION(bluestore_shard_finishers, OPT_BOOL, false)
 
@@ -1038,6 +1074,7 @@ OPTION(kstore_max_bytes, OPT_U64, 64*1024*1024)
 OPTION(kstore_backend, OPT_STR, "rocksdb")
 OPTION(kstore_rocksdb_options, OPT_STR, "compression=kNoCompression")
 OPTION(kstore_fsck_on_mount, OPT_BOOL, false)
+OPTION(kstore_fsck_on_mount_deep, OPT_BOOL, true)
 OPTION(kstore_nid_prealloc, OPT_U64, 1024)
 OPTION(kstore_sync_transaction, OPT_BOOL, false)
 OPTION(kstore_sync_submit_transaction, OPT_BOOL, false)
@@ -1256,11 +1293,7 @@ OPTION(rbd_default_format, OPT_INT, 2)
 OPTION(rbd_default_order, OPT_INT, 22)
 OPTION(rbd_default_stripe_count, OPT_U64, 0) // changing requires stripingv2 feature
 OPTION(rbd_default_stripe_unit, OPT_U64, 0) // changing to non-object size requires stripingv2 feature
-OPTION(rbd_default_features, OPT_INT, 61)   // only applies to format 2 images
-					    // +1 for layering, +2 for stripingv2,
-					    // +4 for exclusive lock, +8 for object map
-					    // +16 for fast-diff, +32 for deep-flatten,
-					    // +64 for journaling, +128 for data pool
+SAFE_OPTION(rbd_default_features, OPT_STR, "layering,exclusive-lock,object-map,fast-diff,deep-flatten")   // only applies to format 2 images
 OPTION(rbd_default_data_pool, OPT_STR, "") // optional default pool for storing image data blocks
 
 OPTION(rbd_default_map_options, OPT_STR, "") // default rbd map -o / --options
@@ -1515,11 +1548,13 @@ OPTION(mgr_module_path, OPT_STR, CEPH_PKGLIBDIR "/mgr") // where to load python 
 OPTION(mgr_modules, OPT_STR, "rest")  // Which modules to load
 OPTION(mgr_data, OPT_STR, "/var/lib/ceph/mgr/$cluster-$id") // where to find keyring etc
 OPTION(mgr_beacon_period, OPT_INT, 5)  // How frequently to send beacon
+OPTION(mon_mgr_digest_period, OPT_INT, 5)  // How frequently to send digests
 OPTION(mon_mgr_beacon_grace, OPT_INT, 30)  // How long to wait to failover
 
 OPTION(rgw_list_bucket_min_readahead, OPT_INT, 1000) // minimum number of entries to read from rados for bucket listing
 
 OPTION(rgw_rest_getusage_op_compat, OPT_BOOL, false) // dump description of total stats for s3 GetUsage API
+OPTION(rgw_compression_type, OPT_STR, "none") // type of compressor, none to not use
 
 OPTION(mutex_perf_counter, OPT_BOOL, false) // enable/disable mutex perf counter
 OPTION(throttler_perf_counter, OPT_BOOL, true) // enable/disable throttler perf counter

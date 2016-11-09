@@ -196,6 +196,7 @@ function set_size() {
     local poolname=pool-jerasure
     local -a initial_osds=($(get_osds $poolname $objname))
     local osd_id=${initial_osds[$shard_id]}
+    ceph osd set noout
     if [ "$mode" = "add" ];
     then
       objectstore_tool $dir $osd_id $objname get-bytes $dir/CORRUPT || return 1
@@ -206,9 +207,9 @@ function set_size() {
     else
       dd if=/dev/urandom bs=$bytes count=1 of=$dir/CORRUPT
     fi
-    objectstore_tool $dir $osd_id --op list $objname
     objectstore_tool $dir $osd_id $objname set-bytes $dir/CORRUPT || return 1
     rm -f $dir/CORRUPT
+    ceph osd unset noout
 }
 
 function rados_get_data_bad_size() {

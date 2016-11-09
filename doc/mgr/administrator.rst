@@ -5,23 +5,20 @@ ceph-mgr administrator's guide
 Setup
 -----
 
-Create an authentication key for your daemon:
+Create an authentication key for your daemon::
 
-::
     ceph auth get-or-create mgr.$name mon 'allow *'
 
 Place that key into ``mgr data`` path, which for a cluster "ceph"
 and mgr $name "foo" would be ``/var/lib/ceph/mgr/ceph-foo``.
 
-Start the ceph-mgr daemon:
+Start the ceph-mgr daemon::
 
-::
     ceph-mgr -i $name
 
 Check that the mgr has come up by looking at the output
-of ``ceph status``, which should now include a mgr status line:
+of ``ceph status``, which should now include a mgr status line::
 
-::
     mgr active: $name
 
 High availability
@@ -35,7 +32,7 @@ active by the monitors, and the others will be standbys.  There is
 no requirement for quorum among the ceph-mgr daemons.
 
 If the active daemon fails to send a beacon to the monitors for
-more than ``mgr beacon period`` (default 30s), then it will be replaced
+more than ``mon mgr beacon grace`` (default 30s), then it will be replaced
 by a standby.
 
 If you want to pre-empt failover, you can explicitly mark a ceph-mgr
@@ -45,9 +42,7 @@ Calling module commands
 -----------------------
 
 Where a module implements command line hooks, using the Ceph CLI's
-``tell`` command to call them like this:
-
-::
+``tell`` command to call them like this::
 
     ceph tell mgr <command | help>
 

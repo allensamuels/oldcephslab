@@ -522,7 +522,8 @@ public:
 				const SequencerPosition &spos);
 
   /// close a replay guard opened with in_progress=true
-  void _close_replay_guard(int fd, const SequencerPosition& spos);
+  void _close_replay_guard(int fd, const SequencerPosition& spos,
+			   const ghobject_t *oid=0);
   void _close_replay_guard(const coll_t& cid, const SequencerPosition& spos);
 
   /**
@@ -559,6 +560,10 @@ public:
     const ghobject_t& oid,
     struct stat *st,
     bool allow_eio = false);
+  using ObjectStore::set_collection_opts;
+  int set_collection_opts(
+    const coll_t& cid,
+    const pool_opts_t& opts);
   using ObjectStore::read;
   int read(
     const coll_t& cid,
@@ -585,9 +590,6 @@ public:
   int _clone_range(const coll_t& oldcid, const ghobject_t& oldoid, const coll_t& newcid, const ghobject_t& newoid,
 		   uint64_t srcoff, uint64_t len, uint64_t dstoff,
 		   const SequencerPosition& spos);
-  int _move_ranges_destroy_src(const coll_t& temp_cid, const ghobject_t& temp_oid, const coll_t& cid, const ghobject_t& oid,
-                     const vector<boost::tuple<uint64_t, uint64_t, uint64_t> > move_info,
-                     const SequencerPosition& spos);
   int _do_clone_range(int from, int to, uint64_t srcoff, uint64_t len, uint64_t dstoff);
   int _do_sparse_copy_range(int from, int to, uint64_t srcoff, uint64_t len, uint64_t dstoff);
   int _do_copy_range(int from, int to, uint64_t srcoff, uint64_t len, uint64_t dstoff, bool skip_sloppycrc=false);

@@ -32,6 +32,7 @@
 #include "include/assert.h"
 #include "include/unordered_map.h"
 #include "include/memory.h"
+#include "include/mempool.h"
 #include "common/Finisher.h"
 #include "compressor/Compressor.h"
 #include "os/ObjectStore.h"
@@ -94,6 +95,7 @@ enum {
   l_bluestore_onode_reshard,
   l_bluestore_gc,
   l_bluestore_gc_bytes,
+  l_bluestore_blob_split,
   l_bluestore_last
 };
 
@@ -119,6 +121,8 @@ public:
 
   /// cached buffer
   struct Buffer {
+    MEMPOOL_CLASS_HELPERS();
+
     enum {
       STATE_EMPTY,     ///< empty buffer -- used for cache history
       STATE_CLEAN,     ///< clean data that is up to date
@@ -206,7 +210,8 @@ public:
 	boost::intrusive::list_member_hook<>,
 	&Buffer::state_item> > state_list_t;
 
-    map<uint64_t,std::unique_ptr<Buffer>> buffer_map;
+    mempool::bluestore_meta_other::map<uint64_t, std::unique_ptr<Buffer>>
+      buffer_map;
     Cache *cache;
 
     // we use a bare intrusive list here instead of std::map because
@@ -319,6 +324,8 @@ public:
 
   /// in-memory shared blob state (incl cached buffers)
   struct SharedBlob {
+    MEMPOOL_CLASS_HELPERS();
+
     std::atomic_int nref = {0}; ///< reference count
 
     // these are defined/set if the shared_blob is 'loaded'
@@ -361,7 +368,7 @@ public:
 
     // we use a bare pointer because we don't want to affect the ref
     // count
-    std::unordered_map<uint64_t,SharedBlob*> sb_map;
+    mempool::bluestore_meta_other::unordered_map<uint64_t,SharedBlob*> sb_map;
 
     SharedBlobRef lookup(uint64_t sbid) {
       std::lock_guard<std::mutex> l(lock);
@@ -392,10 +399,20 @@ public:
       std::lock_guard<std::mutex> l(lock);
       return sb_map.empty();
     }
+
+    void violently_clear() {
+      std::lock_guard<std::mutex> l(lock);
+      for (auto& p : sb_map) {
+	p.second->parent_set = nullptr;
+      }
+      sb_map.clear();
+    }
   };
 
   /// in-memory blob metadata and associated cached buffers (if any)
   struct Blob {
+    MEMPOOL_CLASS_HELPERS();
+
     std::atomic_int nref = {0};     ///< reference count
     int16_t id = -1;                ///< id, for spanning blobs only, >= 0
     int16_t last_encoded_id = -1;   ///< (ephemeral) used during encoding only
@@ -515,10 +532,12 @@ public:
 #endif
   };
   typedef boost::intrusive_ptr<Blob> BlobRef;
-  typedef std::map<int,BlobRef> blob_map_t;
+  typedef mempool::bluestore_meta_other::map<int,BlobRef> blob_map_t;
 
   /// a logical extent, pointing to (some portion of) a blob
   struct Extent : public boost::intrusive::set_base_hook<boost::intrusive::optimize_size<true>> {
+    MEMPOOL_CLASS_HELPERS();
+
     uint32_t logical_offset = 0;      ///< logical offset
     uint32_t blob_offset = 0;         ///< blob offset
     uint32_t length = 0;              ///< length
@@ -593,7 +612,7 @@ public:
       bool loaded = false;   ///< true if shard is loaded
       bool dirty = false;    ///< true if shard is dirty and needs reencoding
     };
-    vector<Shard> shards;    ///< shards
+    mempool::bluestore_meta_other::vector<Shard> shards;    ///< shards
 
     bufferlist inline_bl;    ///< cached encoded map, if unsharded; empty=>dirty
 
@@ -602,6 +621,14 @@ public:
     ExtentMap(Onode *o);
     ~ExtentMap() {
       extent_map.clear_and_dispose([&](Extent *e) { delete e; });
+    }
+
+    void clear() {
+      extent_map.clear();
+      extent_map.clear_and_dispose([&](Extent *e) { delete e; });
+      shards.clear();
+      inline_bl.clear();
+      needs_reshard = false;
     }
 
     bool encode_some(uint32_t offset, uint32_t length, bufferlist& bl,
@@ -723,6 +750,8 @@ public:
 
   /// an in-memory object
   struct Onode {
+    MEMPOOL_CLASS_HELPERS();
+
     std::atomic_int nref;  ///< reference count
     Collection *c;
 
@@ -771,6 +800,8 @@ public:
     std::atomic<uint64_t> num_extents = {0};
     std::atomic<uint64_t> num_blobs = {0};
 
+    size_t last_trim_seq = 0;
+
     static Cache *create(string type, PerfCounters *logger);
 
     virtual ~Cache() {}
@@ -783,6 +814,9 @@ public:
     virtual void _rm_buffer(Buffer *b) = 0;
     virtual void _adjust_buffer_size(Buffer *b, int64_t delta) = 0;
     virtual void _touch_buffer(Buffer *b) = 0;
+
+    virtual uint64_t _get_num_onodes() = 0;
+    virtual uint64_t _get_buffer_bytes() = 0;
 
     void add_extent() {
       ++num_extents;
@@ -798,7 +832,10 @@ public:
       --num_blobs;
     }
 
-    virtual void trim(uint64_t onode_max, uint64_t buffer_max) = 0;
+    void trim(uint64_t target_bytes, float target_meta_ratio,
+	      float bytes_per_onode);
+
+    virtual void _trim(uint64_t onode_max, uint64_t buffer_max) = 0;
 
     virtual void add_stats(uint64_t *onodes, uint64_t *extents,
 			   uint64_t *blobs,
@@ -834,6 +871,9 @@ public:
     uint64_t buffer_size = 0;
 
   public:
+    uint64_t _get_num_onodes() override {
+      return onode_lru.size();
+    }
     void _add_onode(OnodeRef& o, int level) override {
       if (level > 0)
 	onode_lru.push_front(*o);
@@ -846,6 +886,9 @@ public:
     }
     void _touch_onode(OnodeRef& o) override;
 
+    uint64_t _get_buffer_bytes() override {
+      return buffer_size;
+    }
     void _add_buffer(Buffer *b, int level, Buffer *near) override {
       if (near) {
 	auto q = buffer_lru.iterator_to(*near);
@@ -874,7 +917,7 @@ public:
       _audit("_touch_buffer end");
     }
 
-    void trim(uint64_t onode_max, uint64_t buffer_max) override;
+    void _trim(uint64_t onode_max, uint64_t buffer_max) override;
 
     void add_stats(uint64_t *onodes, uint64_t *extents,
 		   uint64_t *blobs,
@@ -928,6 +971,9 @@ public:
     uint64_t buffer_list_bytes[BUFFER_TYPE_MAX] = {0}; ///< bytes per type
 
   public:
+    uint64_t _get_num_onodes() override {
+      return onode_lru.size();
+    }
     void _add_onode(OnodeRef& o, int level) override {
       if (level > 0)
 	onode_lru.push_front(*o);
@@ -940,6 +986,9 @@ public:
     }
     void _touch_onode(OnodeRef& o) override;
 
+    uint64_t _get_buffer_bytes() override {
+      return buffer_bytes;
+    }
     void _add_buffer(Buffer *b, int level, Buffer *near) override;
     void _rm_buffer(Buffer *b) override;
     void _adjust_buffer_size(Buffer *b, int64_t delta) override;
@@ -961,7 +1010,7 @@ public:
       _audit("_touch_buffer end");
     }
 
-    void trim(uint64_t onode_max, uint64_t buffer_max) override;
+    void _trim(uint64_t onode_max, uint64_t buffer_max) override;
 
     void add_stats(uint64_t *onodes, uint64_t *extents,
 		   uint64_t *blobs,
@@ -982,7 +1031,9 @@ public:
 
   struct OnodeSpace {
     Cache *cache;
-    ceph::unordered_map<ghobject_t,OnodeRef> onode_map;  ///< forward lookups
+
+    /// forward lookups
+    mempool::bluestore_meta_other::unordered_map<ghobject_t,OnodeRef> onode_map;
 
     OnodeSpace(Cache *c) : cache(c) {}
     ~OnodeSpace() {
@@ -995,6 +1046,7 @@ public:
 		const ghobject_t& new_oid,
 		const string& new_okey);
     void clear();
+    bool empty();
 
     /// return true if f true for any item
     bool map_any(std::function<bool(OnodeRef)> f);
@@ -1016,6 +1068,9 @@ public:
     // cache onodes on a per-collection basis to avoid lock
     // contention.
     OnodeSpace onode_map;
+
+    //pool options
+    pool_opts_t pool_opts;
 
     OnodeRef get_onode(const ghobject_t& oid, bool create);
 
@@ -1148,6 +1203,8 @@ public:
     bluestore_wal_transaction_t *wal_txn; ///< wal transaction (if any)
     vector<OnodeRef> wal_op_onodes;
 
+    bool kv_submitted = false; ///< true when we've been submitted to kv db
+
     interval_set<uint64_t> allocated, released;
     struct volatile_statfs{
       enum {
@@ -1262,6 +1319,8 @@ public:
     std::mutex wal_apply_mutex;
 
     uint64_t last_seq = 0;
+
+    std::atomic_int kv_committing_serially = {0};
 
     OpSequencer()
 	//set the qlock to PTHREAD_MUTEX_RECURSIVE mode
@@ -1413,15 +1472,14 @@ private:
   bool mounted;
 
   RWLock coll_lock;    ///< rwlock to protect coll_map
-  ceph::unordered_map<coll_t, CollectionRef> coll_map;
+  mempool::bluestore_meta_other::unordered_map<coll_t, CollectionRef> coll_map;
 
   vector<Cache*> cache_shards;
 
-  std::mutex id_lock;
   std::atomic<uint64_t> nid_last = {0};
-  uint64_t nid_max = 0;
+  std::atomic<uint64_t> nid_max = {0};
   std::atomic<uint64_t> blobid_last = {0};
-  uint64_t blobid_max = 0;
+  std::atomic<uint64_t> blobid_max = {0};
 
   Throttle throttle_ops, throttle_bytes;          ///< submit to commit
   Throttle throttle_wal_ops, throttle_wal_bytes;  ///< submit to wal complete
@@ -1440,8 +1498,10 @@ private:
   std::mutex kv_lock;
   std::condition_variable kv_cond, kv_sync_cond;
   bool kv_stop;
-  deque<TransContext*> kv_queue, kv_committing;
-  deque<TransContext*> wal_cleanup_queue, wal_cleaning;
+  deque<TransContext*> kv_queue;             ///< ready, already submitted
+  deque<TransContext*> kv_queue_unsubmitted; ///< ready, need submit by kv thread
+  deque<TransContext*> kv_committing;        ///< currently syncing
+  deque<TransContext*> wal_cleanup_queue;    ///< wal done, ready for cleanup
 
   PerfCounters *logger;
 
@@ -1466,26 +1526,48 @@ private:
 
   bool sync_wal_apply;	  ///< see config option bluestore_sync_wal_apply
 
-  // compression options
-  enum CompressionMode {
-    COMP_NONE,                  ///< compress never
-    COMP_PASSIVE,               ///< compress if hinted COMPRESSIBLE
-    COMP_AGGRESSIVE,            ///< compress unless hinted INCOMPRESSIBLE
-    COMP_FORCE                  ///< compress always
-  };
-  const char *get_comp_mode_name(int m) {
-    switch (m) {
-    case COMP_NONE: return "none";
-    case COMP_PASSIVE: return "passive";
-    case COMP_AGGRESSIVE: return "aggressive";
-    case COMP_FORCE: return "force";
-    default: return "???";
-    }
-  }
-  std::atomic<int> comp_mode = {COMP_NONE}; ///< compression mode
+  std::atomic<Compressor::CompressionMode> comp_mode = {Compressor::COMP_NONE}; ///< compression mode
   CompressorRef compressor;
   std::atomic<uint64_t> comp_min_blob_size = {0};
   std::atomic<uint64_t> comp_max_blob_size = {0};
+
+  // cache trim control
+
+  // note that these update in a racy way, but we don't *really* care if
+  // they're perfectly accurate.  they are all word sized so they will
+  // individually update atomically, but may not be coherent with each other.
+  size_t mempool_seq = 0;
+  size_t mempool_bytes = 0;
+  size_t mempool_onodes = 0;
+
+  void get_mempool_stats(size_t *seq, uint64_t *bytes, uint64_t *onodes) {
+    *seq = mempool_seq;
+    *bytes = mempool_bytes;
+    *onodes = mempool_onodes;
+  }
+
+  struct MempoolThread : public Thread {
+    BlueStore *store;
+    Cond cond;
+    Mutex lock;
+    bool stop = false;
+  public:
+    explicit MempoolThread(BlueStore *s)
+      : store(s),
+	lock("BlueStore::MempoolThread::lock") {}
+    void *entry();
+    void init() {
+      assert(stop == false);
+      create("bstore_mempool");
+    }
+    void shutdown() {
+      lock.Lock();
+      stop = true;
+      cond.Signal();
+      lock.Unlock();
+      join();
+    }
+  } mempool_thread;
 
   // --------------------------------------------------------
   // private methods
@@ -1595,7 +1677,15 @@ private:
   int _collection_list(Collection *c, ghobject_t start, ghobject_t end,
     bool sort_bitwise, int max, vector<ghobject_t> *ls, ghobject_t *next);
 
-
+  template <typename T, typename F>
+  T select_option(const std::string& opt_name, T val1, F f) {
+    //NB: opt_name reserved for future use
+    boost::optional<T> val2 = f();
+    if (val2) {
+      return *val2;
+    }
+    return val1;
+  }
 public:
   BlueStore(CephContext *cct, const string& path);
   ~BlueStore();
@@ -1616,7 +1706,7 @@ public:
   int umount() override;
   void _sync();
 
-  int fsck() override;
+  int fsck(bool deep) override;
 
   void set_cache_shards(unsigned num) override;
 
@@ -1637,6 +1727,9 @@ public:
 
   bool exists(const coll_t& cid, const ghobject_t& oid) override;
   bool exists(CollectionHandle &c, const ghobject_t& oid) override;
+  int set_collection_opts(
+    const coll_t& cid,
+    const pool_opts_t& opts) override;
   int stat(
     const coll_t& cid,
     const ghobject_t& oid,
@@ -1886,6 +1979,7 @@ private:
     WriteContext *wctx);
   int _do_alloc_write(
     TransContext *txc,
+    CollectionRef c,
     WriteContext *wctx);
   void _wctx_finish(
     TransContext *txc,
@@ -1905,6 +1999,14 @@ private:
 	     uint32_t fadvise_flags);
   void _pad_zeros(bufferlist *bl, uint64_t *offset,
 		  uint64_t chunk_size);
+
+  void _do_garbage_collection(TransContext *txc,
+                              CollectionRef& c,
+                              OnodeRef o,
+                              uint64_t& offset,
+                              uint64_t& length,
+                              bufferlist& bl,
+                              WriteContext *wctx);
 
   int _do_write(TransContext *txc,
 		CollectionRef &c,
@@ -2002,11 +2104,6 @@ private:
 		   OnodeRef& oldo,
 		   OnodeRef& newo,
 		   uint64_t srcoff, uint64_t length, uint64_t dstoff);
-  int _move_ranges_destroy_src(TransContext *txc,
-		   CollectionRef& c,
-		   OnodeRef& oldo,
-		   OnodeRef& newo,
-		   const vector<boost::tuple<uint64_t, uint64_t, uint64_t>> move_info);
   int _rename(TransContext *txc,
 	      CollectionRef& c,
 	      OnodeRef& oldo,

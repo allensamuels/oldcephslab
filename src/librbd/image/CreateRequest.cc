@@ -135,7 +135,7 @@ CreateRequest<I>::CreateRequest(IoCtx &ioctx, const std::string &image_name,
   m_objmap_name = ObjectMap::object_map_name(m_image_id, CEPH_NOSNAP);
 
   if (image_options.get(RBD_IMAGE_OPTION_FEATURES, &m_features) != 0) {
-    m_features = m_cct->_conf->rbd_default_features;
+    m_features = util::parse_rbd_default_features(m_cct);
   }
 
   uint64_t features_clear = 0;
@@ -190,6 +190,7 @@ CreateRequest<I>::CreateRequest(IoCtx &ioctx, const std::string &image_name,
   if (!m_data_pool.empty() && m_data_pool != ioctx.get_pool_name()) {
     m_features |= RBD_FEATURE_DATA_POOL;
   } else {
+    m_data_pool.clear();
     m_features &= ~RBD_FEATURE_DATA_POOL;
   }
 
@@ -470,7 +471,6 @@ void CreateRequest<I>::object_map_resize() {
   ldout(m_cct, 20) << this << " " << __func__ << dendl;
 
   librados::ObjectWriteOperation op;
-  op.create(true);
   cls_client::object_map_resize(&op, Striper::get_num_objects(m_layout, m_size),
                                 OBJECT_NONEXISTENT);
 

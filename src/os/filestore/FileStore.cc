@@ -473,13 +473,7 @@ int FileStore::lfn_unlink(const coll_t& cid, const ghobject_t& o,
     }
 
     if (!force_clear_omap) {
-      if (hardlink == 0) {
-          if (!m_disable_wbthrottle) {
-	    wbthrottle.clear_object(o); // should be only non-cache ref
-          }
-	  fdcache.clear(o);
-	  return 0;
-      } else if (hardlink == 1) {
+      if (hardlink == 0 || hardlink == 1) {
 	  force_clear_omap = true;
       }
     }
@@ -505,6 +499,12 @@ int FileStore::lfn_unlink(const coll_t& cid, const ghobject_t& o,
        */
       if (!backend->can_checkpoint())
 	object_map->sync(&o, &spos);
+    }
+    if (hardlink == 0) {
+      if (!m_disable_wbthrottle) {
+	wbthrottle.clear_object(o); // should be only non-cache ref
+      }
+      return 0;
     }
   }
   r = index->unlink(o);
@@ -2054,8 +2054,10 @@ int FileStore::queue_transactions(Sequencer *posr, vector<Transaction>& tls,
   Context *onreadable_sync;
   ObjectStore::Transaction::collect_contexts(
     tls, &onreadable, &ondisk, &onreadable_sync);
-  if (g_conf->filestore_blackhole) {
-    dout(0) << "queue_transactions filestore_blackhole = TRUE, dropping transaction" << dendl;
+
+  if (g_conf->objectstore_blackhole) {
+    dout(0) << __func__ << " objectstore_blackhole = TRUE, dropping transaction"
+	    << dendl;
     delete ondisk;
     delete onreadable;
     delete onreadable_sync;
@@ -2344,10 +2346,12 @@ void FileStore::_set_replay_guard(int fd,
   // first make sure the previous operation commits
   ::fsync(fd);
 
-  // sync object_map too.  even if this object has a header or keys,
-  // it have had them in the past and then removed them, so always
-  // sync.
-  object_map->sync(hoid, &spos);
+  if (!in_progress) {
+    // sync object_map too.  even if this object has a header or keys,
+    // it have had them in the past and then removed them, so always
+    // sync.
+    object_map->sync(hoid, &spos);
+  }
 
   _inject_failure();
 
@@ -2385,7 +2389,8 @@ void FileStore::_close_replay_guard(const coll_t& cid,
   VOID_TEMP_FAILURE_RETRY(::close(fd));
 }
 
-void FileStore::_close_replay_guard(int fd, const SequencerPosition& spos)
+void FileStore::_close_replay_guard(int fd, const SequencerPosition& spos,
+				    const ghobject_t *hoid)
 {
   if (backend->can_checkpoint())
     return;
@@ -2393,6 +2398,11 @@ void FileStore::_close_replay_guard(int fd, const SequencerPosition& spos)
   dout(10) << "_close_replay_guard " << spos << dendl;
 
   _inject_failure();
+
+  // sync object_map too.  even if this object has a header or keys,
+  // it have had them in the past and then removed them, so always
+  // sync.
+  object_map->sync(hoid, &spos);
 
   // then record that we are done with this operation
   bufferlist v(40);
@@ -2699,22 +2709,6 @@ void FileStore::_do_transaction(
       }
       break;
 
-    case Transaction::OP_MERGE_DELETE:
-      {
-        ghobject_t src_oid = i.get_oid(op->oid);
-        coll_t cid = i.get_cid(op->cid);
-        ghobject_t oid = i.get_oid(op->dest_oid);
-        coll_t src_cid = i.get_cid(op->cid);
-        _kludge_temp_object_collection(cid, oid);
-        _kludge_temp_object_collection(src_cid, src_oid);
-        vector<boost::tuple<uint64_t, uint64_t, uint64_t>> move_info;
-        i.decode_move_info(move_info);
-        tracepoint(objectstore, move_ranges_destroy_src_enter, osr_name);
-        r = _move_ranges_destroy_src(src_cid, src_oid, cid, oid, move_info, spos);
-        tracepoint(objectstore, move_ranges_destroy_src_exit, r);
-      }
-      break;
-
     case Transaction::OP_MKCOLL:
       {
         coll_t cid = i.get_cid(op->cid);
@@ -3003,8 +2997,8 @@ void FileStore::_do_transaction(
 	  msg = "ENOTEMPTY suggests garbage data in osd data dir";
 	}
 
-	dout(0) << " error " << cpp_strerror(r) << " not handled on operation " << op
-		<< " (" << spos << ", or op " << spos.op << ", counting from 0)" << dendl;
+	derr  << " error " << cpp_strerror(r) << " not handled on operation " << op
+	      << " (" << spos << ", or op " << spos.op << ", counting from 0)" << dendl;
 	dout(0) << msg << dendl;
 	dout(0) << " transaction dump:\n";
 	JSONFormatter f(true);
@@ -3067,6 +3061,13 @@ int FileStore::stat(
     tracepoint(objectstore, stat_exit, r);
     return r;
   }
+}
+
+int FileStore::set_collection_opts(
+  const coll_t& cid,
+  const pool_opts_t& opts)
+{
+  return -EOPNOTSUPP;
 }
 
 int FileStore::read(
@@ -3155,11 +3156,13 @@ int FileStore::read(
 int FileStore::_do_fiemap(int fd, uint64_t offset, size_t len,
                           map<uint64_t, uint64_t> *m)
 {
-  struct fiemap *fiemap = NULL;
   uint64_t i;
   struct fiemap_extent *extent = NULL;
+  struct fiemap_extent *last = NULL;
+  struct fiemap *fiemap = NULL;
   int r = 0;
 
+more:
   r = backend->do_fiemap(fd, offset, len, &fiemap);
   if (r < 0)
     return r;
@@ -3199,9 +3202,15 @@ int FileStore::_do_fiemap(int fd, uint64_t offset, size_t len,
       extent->fe_length = offset + len - extent->fe_logical;
     (*m)[extent->fe_logical] = extent->fe_length;
     i++;
-    extent++;
+    last = extent++;
   }
   free(fiemap);
+  if (!(last->fe_flags & FIEMAP_EXTENT_LAST)) {
+    uint64_t xoffset = last->fe_logical + last->fe_length - offset;
+    offset = last->fe_logical + last->fe_length;
+    len -= xoffset;
+    goto more;
+  }
 
   return r;
 }
@@ -3762,86 +3771,6 @@ int FileStore::_clone_range(const coll_t& oldcid, const ghobject_t& oldoid, cons
  out2:
   dout(10) << "clone_range " << oldcid << "/" << oldoid << " -> " << newcid << "/" << newoid << " "
 	   << srcoff << "~" << len << " to " << dstoff << " = " << r << dendl;
-  return r;
-}
-
-/*
- * Move contents of src object according to move_info to base object. Once the move_info is traversed completely, delete the src object.
- */
-int FileStore::_move_ranges_destroy_src(const coll_t& src_cid, const ghobject_t& src_oid, const coll_t& cid, const ghobject_t& oid,
-                              const vector<boost::tuple<uint64_t, uint64_t, uint64_t>> move_info,
-                              const SequencerPosition& spos)
-{
-  int r = 0;
-
-  dout(10) << __func__ << src_cid << "/" << src_oid << " -> " << cid << "/" << oid << dendl;
-
-  // check replay guard for base object. If not possible to replay, return.
-  int dstcmp = _check_replay_guard(cid, oid, spos);
-  if (dstcmp < 0)
-    return 0;
-
-  // check the src name too; it might have a newer guard, and we don't
-  // want to clobber it
-  int srccmp = _check_replay_guard(src_cid, src_oid, spos);
-  if (srccmp < 0)
-    return 0;
-
-  FDRef b;
-  r = lfn_open(cid, oid, true, &b);
-  if (r < 0) {
-    return 0;
-  }
-
-  FDRef t;
-  r = lfn_open(src_cid, src_oid, false, &t);
-  //If we are replaying, it is possible that we do not find src obj as it is deleted before crashing.
-  if (r < 0) {
-    lfn_close(b);
-    dout(10) << __func__ << " replaying -->" << replaying  << dendl;
-    if (replaying) {
-      _set_replay_guard(**b, spos, &oid);
-      return 0;
-    } else {
-      return -ENOENT;
-    }
-  }
-
-  for (unsigned i = 0; i < move_info.size(); ++i) {
-     uint64_t srcoff = move_info[i].get<0>();
-     uint64_t dstoff = move_info[i].get<1>();
-     uint64_t len = move_info[i].get<2>();
-
-     r = _do_clone_range(**t, **b, srcoff, len, dstoff);
-     if (r < 0)
-       break;
-  }
-
-  dout(10) << __func__  << cid << "/" << oid << " "  <<  " = " << r << dendl;
-
-  lfn_close(t);
-
-  //In case crash occurs here, replay will have to do cloning again.
-  //Only if do_clone_range is successful, go ahead with deleting the source object.
-  if (r < 0)
-    goto out;
-
-  r = lfn_unlink(src_cid, src_oid, spos, true);
-  // If crash occurs between unlink and set guard, correct the error.
-  // as during next time, it might not find the already deleted object.
-  if (r < 0 && replaying) {
-    r = 0;
-  }
-
-  if (r < 0)
-    goto out;
-
-  //set replay guard for base obj coll_t, as this api is not idempotent.
-  _set_replay_guard(**b, spos, &oid);
-
-out:
-  lfn_close(b);
-  dout(10) << __func__  << cid << "/" << oid << " "  <<  " = " << r << dendl;
   return r;
 }
 
@@ -5257,18 +5186,30 @@ int FileStore::_collection_move_rename(const coll_t& oldcid, const ghobject_t& o
       } else {
 	assert(0 == "ERROR: source must exist");
       }
-      return 0;
-    }
-    if (dstcmp > 0) {      // if dstcmp == 0 the guard already says "in-progress"
-      _set_replay_guard(**fd, spos, &o, true);
-    }
 
-    r = lfn_link(oldcid, c, oldoid, o);
-    if (replaying && !backend->can_checkpoint() &&
-	r == -EEXIST)    // crashed between link() and set_replay_guard()
-      r = 0;
+      if (!replaying) {
+	return 0;
+      }
+      if (allow_enoent && dstcmp > 0) { // if dstcmp == 0, try_rename was started.
+	return 0;
+      }
 
-    _inject_failure();
+      r = 0; // don't know if object_map was cloned
+    } else {
+      if (dstcmp > 0) { // if dstcmp == 0 the guard already says "in-progress"
+	_set_replay_guard(**fd, spos, &o, true);
+      }
+
+      r = lfn_link(oldcid, c, oldoid, o);
+      if (replaying && !backend->can_checkpoint() &&
+	  r == -EEXIST)    // crashed between link() and set_replay_guard()
+	r = 0;
+
+      lfn_close(fd);
+      fd = FDRef();
+
+      _inject_failure();
+    }
 
     if (r == 0) {
       // the name changed; link the omap content
@@ -5279,9 +5220,6 @@ int FileStore::_collection_move_rename(const coll_t& oldcid, const ghobject_t& o
 
     _inject_failure();
 
-    lfn_close(fd);
-    fd = FDRef();
-
     if (r == 0)
       r = lfn_unlink(oldcid, oldoid, spos, true);
 
@@ -5290,7 +5228,7 @@ int FileStore::_collection_move_rename(const coll_t& oldcid, const ghobject_t& o
 
     // close guard on object so we don't do this again
     if (r == 0) {
-      _close_replay_guard(**fd, spos);
+      _close_replay_guard(**fd, spos, &o);
       lfn_close(fd);
     }
   }
@@ -5488,7 +5426,7 @@ int FileStore::_split_collection(const coll_t& cid,
     _close_replay_guard(cid, spos);
     _close_replay_guard(dest, spos);
   }
-  if (g_conf->filestore_debug_verify_split) {
+  if (!r && g_conf->filestore_debug_verify_split) {
     vector<ghobject_t> objects;
     ghobject_t next;
     while (1) {
@@ -5618,8 +5556,10 @@ void FileStore::handle_conf_change(const struct md_config_t *conf,
       changed.count("filestore_max_xattr_value_size_xfs") ||
       changed.count("filestore_max_xattr_value_size_btrfs") ||
       changed.count("filestore_max_xattr_value_size_other")) {
-    Mutex::Locker l(lock);
-    set_xattr_limits_via_conf();
+    if (backend) {
+      Mutex::Locker l(lock);
+      set_xattr_limits_via_conf();
+    }
   }
 
   if (changed.count("filestore_queue_max_bytes") ||

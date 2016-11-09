@@ -194,6 +194,7 @@ CompatSet OSD::get_osd_initial_compat_set() {
   ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_HINTS);
   ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_PGMETA);
   ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_MISSING);
+  ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_FASTINFO);
   return CompatSet(ceph_osd_feature_compat, ceph_osd_feature_ro_compat,
 		   ceph_osd_feature_incompat);
 }
@@ -1053,7 +1054,7 @@ bool OSDService::can_inc_scrubs_pending()
   Mutex::Locker l(sched_scrub_lock);
 
   if (scrubs_pending + scrubs_active < cct->_conf->osd_max_scrubs) {
-    dout(20) << __func__ << scrubs_pending << " -> " << (scrubs_pending+1)
+    dout(20) << __func__ << " " << scrubs_pending << " -> " << (scrubs_pending+1)
 	     << " (max " << cct->_conf->osd_max_scrubs << ", active " << scrubs_active << ")" << dendl;
     can_inc = true;
   } else {
@@ -2590,6 +2591,13 @@ void OSD::create_logger()
   osd_plb.add_time_avg(l_osd_tier_promote_lat, "osd_tier_promote_lat", "Object promote latency");
   osd_plb.add_time_avg(l_osd_tier_r_lat, "osd_tier_r_lat", "Object proxy read latency");
 
+  osd_plb.add_u64_counter(l_osd_pg_info, "osd_pg_info",
+			  "PG updated its info (using any method)");
+  osd_plb.add_u64_counter(l_osd_pg_fastinfo, "osd_pg_fastinfo",
+			  "PG updated its info using fastinfo attr");
+  osd_plb.add_u64_counter(l_osd_pg_biginfo, "osd_pg_biginfo",
+			  "PG updated its biginfo attr");
+
   logger = osd_plb.create_perf_counters();
   cct->get_perfcounters_collection()->add(logger);
 }
@@ -2795,6 +2803,12 @@ int OSD::shutdown()
 
   dout(10) << "syncing store" << dendl;
   enable_disable_fuse(true);
+
+  if (g_conf->osd_journal_flush_on_shutdown) {
+    dout(10) << "flushing journal" << dendl;
+    store->flush_journal();
+  }
+
   store->umount();
   delete store;
   store = 0;
@@ -4899,9 +4913,12 @@ void OSD::_preboot(epoch_t oldest, epoch_t newest)
   // if our map within recent history, try to add ourselves to the osdmap.
   if (osdmap->test_flag(CEPH_OSDMAP_NOUP)) {
     dout(5) << "osdmap NOUP flag is set, waiting for it to clear" << dendl;
-  } else if (!osdmap->test_flag(CEPH_OSDMAP_SORTBITWISE) &&
-	     !store->can_sort_nibblewise()) {
-    dout(1) << "osdmap SORTBITWISE flag is NOT set but our backend does not support nibblewise sort" << dendl;
+  } else if (!osdmap->test_flag(CEPH_OSDMAP_SORTBITWISE)) {
+    dout(1) << "osdmap SORTBITWISE OSDMap flag is NOT set; please set it"
+	    << dendl;
+  } else if (!osdmap->test_flag(CEPH_OSDMAP_REQUIRE_JEWEL)) {
+    dout(1) << "osdmap REQUIRE_JEWEL OSDMap flag is NOT set; please set it"
+	    << dendl;
   } else if (osdmap->get_num_up_osds() &&
 	     (osdmap->get_up_osd_features() & CEPH_FEATURE_HAMMER_0_94_4) == 0) {
     dout(1) << "osdmap indicates one or more pre-v0.94.4 hammer OSDs is running"
@@ -5466,7 +5483,7 @@ void OSD::do_command(Connection *con, ceph_tid_t tid, vector<string>& cmd, buffe
       ostringstream secname;
       secname << "cmd" << setfill('0') << std::setw(3) << cmdnum;
       dump_cmddesc_to_json(f, secname.str(), cp->cmdstring, cp->helpstring,
-			   cp->module, cp->perm, cp->availability);
+			   cp->module, cp->perm, cp->availability, 0);
       cmdnum++;
     }
     f->close_section();	// command_descriptions
@@ -5532,11 +5549,10 @@ void OSD::do_command(Connection *con, ceph_tid_t tid, vector<string>& cmd, buffe
   // 'tell <pgid>' (which comes in without any of that prefix)?
 
   else if (prefix == "pg" ||
-	   (cmd_getval(cct, cmdmap, "pgid", pgidstr) &&
-	     (prefix == "query" ||
-	      prefix == "mark_unfound_lost" ||
-	      prefix == "list_missing")
-	   )) {
+	    prefix == "query" ||
+	    prefix == "mark_unfound_lost" ||
+	    prefix == "list_missing"
+	   ) {
     pg_t pgid;
 
     if (!cmd_getval(cct, cmdmap, "pgid", pgidstr)) {
@@ -7072,12 +7088,12 @@ void OSD::_committed_osd_maps(epoch_t first, epoch_t last, MOSDMap *m)
 	       osd_markdown_log.front() + grace < now)
 	  osd_markdown_log.pop_front();
 	if ((int)osd_markdown_log.size() > g_conf->osd_max_markdown_count) {
-	  dout(10) << __func__ << " marked down "
-		   << osd_markdown_log.size()
-		   << " > osd_max_markdown_count "
-		   << g_conf->osd_max_markdown_count
-		   << " in last " << grace << " seconds, shutting down"
-		   << dendl;
+	  dout(0) << __func__ << " marked down "
+		  << osd_markdown_log.size()
+		  << " > osd_max_markdown_count "
+		  << g_conf->osd_max_markdown_count
+		  << " in last " << grace << " seconds, shutting down"
+		  << dendl;
 	  do_restart = false;
 	  do_shutdown = true;
 	}
@@ -7093,18 +7109,21 @@ void OSD::_committed_osd_maps(epoch_t first, epoch_t last, MOSDMap *m)
 	if (r != 0) {
 	  do_shutdown = true;  // FIXME: do_restart?
           network_error = true;
+          dout(0) << __func__ << " marked down: rebind failed" << dendl;
         }
 
 	r = hb_back_server_messenger->rebind(avoid_ports);
 	if (r != 0) {
 	  do_shutdown = true;  // FIXME: do_restart?
           network_error = true;
+          dout(0) << __func__ << " marked down: rebind failed" << dendl;
         }
 
 	r = hb_front_server_messenger->rebind(avoid_ports);
 	if (r != 0) {
 	  do_shutdown = true;  // FIXME: do_restart?
           network_error = true;
+          dout(0) << __func__ << " marked down: rebind failed" << dendl;
         }
 
 	hbclient_messenger->mark_down_all();

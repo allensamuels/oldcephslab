@@ -1874,7 +1874,7 @@ void CInode::start_scatter(ScatterLock *lock)
 }
 
 
-class C_Inode_FragUpdate : public MDSInternalContextBase {
+class C_Inode_FragUpdate : public MDSLogContextBase {
 protected:
   CInode *in;
   CDir *dir;
@@ -3813,9 +3813,13 @@ void CInode::validate_disk_state(CInode::validated_data *results,
       bool equivalent, divergent;
       int memory_newer;
 
+      MDCache *mdcache = in->mdcache;  // For the benefit of dout
+      const inode_t& inode = in->inode;  // For the benefit of dout
+
       // Ignore rval because it's the result of a FAILOK operation
       // from fetch_backtrace_and_tag: the real result is in
       // backtrace.ondisk_read_retval
+      dout(20) << "ondisk_read_retval: " << results->backtrace.ondisk_read_retval << dendl;
       if (results->backtrace.ondisk_read_retval != 0) {
         results->backtrace.error_str << "failed to read off disk; see retval";
 	goto next;
@@ -3825,6 +3829,7 @@ void CInode::validate_disk_state(CInode::validated_data *results,
       try {
         bufferlist::iterator p = bl.begin();
         ::decode(results->backtrace.ondisk_value, p);
+        dout(10) << "decoded " << bl.length() << " bytes of backtrace successfully" << dendl;
       } catch (buffer::error&) {
         if (results->backtrace.ondisk_read_retval == 0 && rval != 0) {
           // Cases where something has clearly gone wrong with the overall
@@ -3840,22 +3845,26 @@ void CInode::validate_disk_state(CInode::validated_data *results,
       memory_newer = memory_backtrace.compare(results->backtrace.ondisk_value,
 					      &equivalent, &divergent);
 
-      if (equivalent) {
-        results->backtrace.passed = true;
+      if (divergent || memory_newer < 0) {
+	// we're divergent, or on-disk version is newer
+	results->backtrace.error_str << "On-disk backtrace is divergent or newer";
       } else {
-        if (divergent || memory_newer <= 0) {
-          // we're divergent, or don't have a newer version to write
-          results->backtrace.error_str <<
-              "On-disk backtrace is divergent or newer";
-	  goto next;
-        }
+        results->backtrace.passed = true;
       }
 next:
+
+      if (!results->backtrace.passed && in->scrub_infop->header->get_repair()) {
+        std::string path;
+        in->make_path_string(path);
+        in->mdcache->mds->clog->warn() << "bad backtrace on inode " << *in
+                           << ", rewriting it at " << path;
+        in->_mark_dirty_parent(in->mdcache->mds->mdlog->get_current_segment(),
+                           false);
+      }
+
       // If the inode's number was free in the InoTable, fix that
       // (#15619)
       {
-        const inode_t& inode = in->inode;
-        MDCache *mdcache = in->mdcache;
         InoTable *inotable = mdcache->mds->inotable;
 
         dout(10) << "scrub: inotable ino = 0x" << std::hex << inode.ino << dendl;

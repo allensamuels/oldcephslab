@@ -19,6 +19,7 @@
 #include "include/stringify.h"
 #include "cls/journal/cls_journal_types.h"
 #include "cls/journal/cls_journal_client.h"
+#include "cls/rbd/cls_rbd_types.h"
 #include "cls/rbd/cls_rbd_client.h"
 #include "journal/Journaler.h"
 #include "librbd/AioCompletion.h"
@@ -99,7 +100,7 @@ public:
 					       m_remote_ioctx));
 
     m_image_name = get_temp_image_name();
-    uint64_t features = g_ceph_context->_conf->rbd_default_features;
+    uint64_t features = librbd::util::parse_rbd_default_features(g_ceph_context);
     features |= RBD_FEATURE_EXCLUSIVE_LOCK | RBD_FEATURE_JOURNALING;
     int order = 0;
     EXPECT_EQ(0, librbd::create(m_remote_ioctx, m_image_name.c_str(), 1 << 22,
@@ -737,7 +738,8 @@ TEST_F(TestImageReplayer, MultipleReplayFailures_SingleEpoch) {
   librbd::ImageCtx *ictx;
   open_image(m_local_ioctx, m_image_name, false, &ictx);
   ictx->features &= ~RBD_FEATURE_JOURNALING;
-  ASSERT_EQ(0, ictx->operations->snap_create("foo"));
+  ASSERT_EQ(0, ictx->operations->snap_create("foo",
+					     cls::rbd::UserSnapshotNamespace()));
   ASSERT_EQ(0, ictx->operations->snap_protect("foo"));
   ASSERT_EQ(0, librbd::cls_client::add_child(&ictx->md_ctx, RBD_CHILDREN,
                                              {ictx->md_ctx.get_id(),
@@ -784,7 +786,8 @@ TEST_F(TestImageReplayer, MultipleReplayFailures_MultiEpoch) {
   librbd::ImageCtx *ictx;
   open_image(m_local_ioctx, m_image_name, false, &ictx);
   ictx->features &= ~RBD_FEATURE_JOURNALING;
-  ASSERT_EQ(0, ictx->operations->snap_create("foo"));
+  ASSERT_EQ(0, ictx->operations->snap_create("foo",
+					     cls::rbd::UserSnapshotNamespace()));
   ASSERT_EQ(0, ictx->operations->snap_protect("foo"));
   ASSERT_EQ(0, librbd::cls_client::add_child(&ictx->md_ctx, RBD_CHILDREN,
                                              {ictx->md_ctx.get_id(),
